@@ -1,5 +1,5 @@
 ---
-title: "Sales Reports and Revenue Analytics in Admin"
+title: "Viajes AJT Admin: Sales Reports and Revenue Analytics"
 sidebarTitle: "Reports"
 description: "Viajes AJT sales analytics: total revenue, monthly trends, top packages, payment method breakdown, and CSV export from the admin ventas panel."
 ---
@@ -45,7 +45,7 @@ $conversionRate = $clientesCount > 0
 | `pagos_confirmados` | Count of payments with `estado = 'validado'` |
 | `pagos_pendientes` | Count of payments with `estado = 'pendiente'` |
 | `ticket_promedio` | `total_vendido / pagos_confirmados` (0.0 if no confirmed payments) |
-| `ventas_mes` | Sum of validated payments in the current calendar month |
+| `ventas_mes` | Sum of validated payments where `MONTH(created_at)` matches the current month number (all years) |
 | `transacciones` | Full transaction list (joined with user, package, and payment method data) |
 | `top_paquetes` | Top 4 packages by total revenue |
 | `max_total` | Revenue of the highest-grossing package (used to scale bar chart widths) |
@@ -57,13 +57,13 @@ $conversionRate = $clientesCount > 0
     Navigate to `/admin/ventas` without any query parameter. `Reporte::getVentasData(null)` is called and the transaction table shows all payment methods.
   </Tab>
   <Tab title="Card (Tarjeta)">
-    Navigate to `/admin/ventas?metodo=card`. The `filtroMetodo` value is passed to `Reporte::getVentasData('card')`, which filters the transaction list by `mp.nombre = 'card'` in the join with `metodos_pago`.
+    Navigate to `/admin/ventas?metodo=Tarjeta+de+Cr%C3%A9dito+%2F+D%C3%A9bito`. The `filtroMetodo` value is passed to `Reporte::getVentasData($filtroMetodo)`, which filters the transaction list by matching `mp.nombre` in the join with `metodos_pago`.
   </Tab>
   <Tab title="Bank Transfer (Transferencia)">
-    Navigate to `/admin/ventas?metodo=trans`. Filters transactions to `mp.nombre = 'trans'`.
+    Navigate to `/admin/ventas?metodo=Transferencia+Bancaria`. Filters transactions to rows where `mp.nombre = 'Transferencia Bancaria'`.
   </Tab>
   <Tab title="Yape / Plin">
-    Navigate to `/admin/ventas?metodo=yape`. Filters transactions to `mp.nombre = 'yape'`.
+    Navigate to `/admin/ventas?metodo=Yape+%2F+Plin`. Filters transactions to rows where `mp.nombre = 'Yape / Plin'`.
   </Tab>
 </Tabs>
 
@@ -74,7 +74,7 @@ $filtroMetodo = isset($_GET['metodo']) ? trim($_GET['metodo']) : '';
 $data = Reporte::getVentasData($filtroMetodo !== '' ? $filtroMetodo : null);
 ```
 
-Active payment methods are also queried from the `metodos_pago` table (`WHERE activo = 1`) to populate the filter UI dynamically.
+The `?metodo=` value is compared directly against `metodos_pago.nombre` in the SQL query (`WHERE mp.nombre = :metodo`), so it must match the stored name exactly. Active payment methods are also queried from the `metodos_pago` table (`WHERE activo = 1`) to populate the filter UI dynamically.
 
 ## Monthly Income Chart
 
@@ -182,4 +182,4 @@ The currency symbol displayed throughout the admin panel is read from the `confi
 Config::getString('moneda_simbolo', 'S/')
 ```
 
-The default value is `S/` (Peruvian sol). To change it, update the `moneda_simbolo` key from the Settings page at `/admin/ajustes`.
+The default value is `S/` (Peruvian sol). This key is read-only through the standard Ajustes form — it is not included in the editable fields processed by `AdminController::guardarAjustes()`. To change it, update the `moneda_simbolo` row directly in the `configuracion` database table.

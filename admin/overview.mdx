@@ -1,7 +1,7 @@
 ---
-title: "Admin Panel: Managing Viajes AJT Back-Office"
+title: "Viajes AJT Admin Panel: Back-Office Overview Guide"
 sidebarTitle: "Overview"
-description: "Overview of the Viajes AJT admin panel — role-based access, navigation structure, dashboard KPIs, and links to all admin modules."
+description: "Overview of the Viajes AJT admin panel: role-based access control, navigation structure, dashboard KPIs, and links to all admin modules."
 ---
 
 The Viajes AJT admin panel is the central back-office for managing tour packages, reservations, users, sales reports, and system settings. Every route under `/admin/` is protected by a role check executed in the `AdminController` constructor — unauthenticated visitors or users without administrator privileges are immediately redirected to `/auth/login`.
@@ -75,11 +75,12 @@ The admin layout exposes the following top-level modules:
 | Ventas | `/admin/ventas` | Sales analytics and CSV export |
 | Usuarios | `/admin/usuarios` | User list, roles, and admin registration |
 | Visas | `/admin/visas` | Visa service request management |
+| Reclamaciones | `/admin/reclamaciones` | Customer complaints and suggestions |
 | Ajustes | `/admin/ajustes` | System-wide payment and contact settings |
 
 ## System Settings
 
-The **Ajustes** page at `GET /admin/ajustes` reads all key-value pairs from the `configuracion` database table via `Config::getAll()`. Saving the form posts to `POST /admin/ajustes/guardar` and persists values using `Config::saveMany()`, which uses `INSERT ... ON DUPLICATE KEY UPDATE` so missing rows are created automatically.
+The **Ajustes** page at `GET /admin/ajustes` reads all key-value pairs from the `configuracion` database table via `Config::getAll()`. Saving the form posts to `POST /admin/ajustes` (same URL, different HTTP method) and persists values using `Config::saveMany()`, which uses `INSERT ... ON DUPLICATE KEY UPDATE` so missing rows are created automatically.
 
 Configurable fields include:
 

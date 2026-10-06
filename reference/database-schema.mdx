@@ -1,5 +1,5 @@
 ---
-title: "Viajes AJT Database Schema and Table Reference"
+title: "Viajes AJT MySQL Database Schema and Table Reference"
 sidebarTitle: "Database Schema"
 description: "Complete reference for the Viajes AJT MySQL database — all tables, columns, relationships, and foreign key constraints for the viajes_ajt_3fn schema."
 ---
@@ -200,7 +200,29 @@ All of these tables share the same `ON DELETE CASCADE` relationship to `paquetes
 
 ---
 
-## Group 4: Booking
+## Group 4: Booking and Visa Transactions
+
+### `solicitudes_visa`
+
+Visa advisory consultation requests submitted by authenticated users. Created before `reservas` and `pagos` because `pagos` carries a nullable foreign key back to this table.
+
+```sql
+CREATE TABLE IF NOT EXISTS solicitudes_visa (
+    id_solicitud     INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_usuario       INT UNSIGNED NOT NULL,
+    id_servicio      INT UNSIGNED NOT NULL,
+    codigo_solicitud VARCHAR(20) NOT NULL UNIQUE,
+    fecha_viaje_aprox DATE NULL,
+    estado           ENUM('nueva','contactado','documentos_pendientes',
+                          'en_revision','en_tramite','aprobada',
+                          'rechazada','cancelada') NOT NULL DEFAULT 'nueva',
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_usuario)  REFERENCES usuarios(id_usuario)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (id_servicio) REFERENCES servicios_visa(id_servicio)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
 
 ### `reservas`
 
@@ -322,28 +344,6 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 SELECT COUNT(*) FROM rate_limits
 WHERE identifier = :identifier
 AND created_at > DATE_SUB(NOW(), INTERVAL :minutes MINUTE)
-```
-
-### `solicitudes_visa`
-
-Visa advisory consultation requests submitted by authenticated users.
-
-```sql
-CREATE TABLE IF NOT EXISTS solicitudes_visa (
-    id_solicitud     INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    id_usuario       INT UNSIGNED NOT NULL,
-    id_servicio      INT UNSIGNED NOT NULL,
-    codigo_solicitud VARCHAR(20) NOT NULL UNIQUE,
-    fecha_viaje_aprox DATE NULL,
-    estado           ENUM('nueva','contactado','documentos_pendientes',
-                          'en_revision','en_tramite','aprobada',
-                          'rechazada','cancelada') NOT NULL DEFAULT 'nueva',
-    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (id_usuario)  REFERENCES usuarios(id_usuario)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    FOREIGN KEY (id_servicio) REFERENCES servicios_visa(id_servicio)
-        ON UPDATE CASCADE ON DELETE RESTRICT
-) ENGINE=InnoDB;
 ```
 
 ### Additional Utility Tables

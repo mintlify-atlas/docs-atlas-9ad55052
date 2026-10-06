@@ -1,7 +1,7 @@
 ---
-title: "Booking and Profile API Endpoints Reference"
+title: "Checkout, Booking, and Profile API Endpoints — Viajes AJT"
 sidebarTitle: "Booking API"
-description: "HTTP endpoints for Viajes AJT checkout, reservation processing, user profile management, and visa advisory requests."
+description: "HTTP endpoints for Viajes AJT checkout, reservation processing, user profile management, visa advisory requests, and the complaints system."
 ---
 
 This reference covers all transactional endpoints in Viajes AJT: the two-step checkout flow (`GET /checkout` → `POST /booking/procesar-checkout`), user profile management, visa advisory requests, and the complaint (libro de reclamaciones) system. All booking and profile endpoints require an active authenticated session. Visa solicitation and complaint submission also require login; the catalog page for visas is public.
@@ -68,25 +68,34 @@ After the user logs in or registers, `POST /auth/login` and `POST /auth/registro
 
 #### Financial Breakdown
 
-The checkout page displays a live financial breakdown computed by `BookingController::calcularDesglose()`:
+The checkout page displays a live financial breakdown computed by `BookingController::calcularDesglose()`, which returns the array `['subtotal', 'descuento', 'igv', 'total']`:
 
 ```php
 // Given: $precioUnitario (package precio_base), $pax (viajeros count)
 
-$subtotal       = $precioUnitario * $pax;
-$descuento      = ($pax >= 2) ? round($subtotal * 0.10, 2) : 0.00;
-$baseImponible  = $subtotal - $descuento;
-$igv            = round($baseImponible * 0.18, 2);
-$total          = round($baseImponible + $igv, 2);
+$subtotal      = $precioUnitario * $pax;
+$descuento     = 0.00;
+if ($pax >= 2) {
+    $descuento = round($subtotal * 0.10, 2);
+}
+$baseImponible = $subtotal - $descuento;   // intermediate — not in returned array
+$igv           = round($baseImponible * 0.18, 2);
+$total         = round($baseImponible + $igv, 2);
+
+return [
+    'subtotal'  => $subtotal,
+    'descuento' => $descuento,
+    'igv'       => $igv,
+    'total'     => $total,
+];
 ```
 
-| Line item       | Rule                                          | Example (S/ 1,290 × 2 pax) |
-| --------------- | --------------------------------------------- | -------------------------- |
-| `subtotal`      | `precio_base × pax`                           | S/ 2,580.00                |
-| `descuento`     | 10% of subtotal if `pax >= 2`, else `0.00`    | S/ 258.00                  |
-| `baseImponible` | `subtotal − descuento`                        | S/ 2,322.00                |
-| `igv`           | 18% of `baseImponible` (Peruvian VAT)         | S/ 417.96                  |
-| `total`         | `baseImponible + igv`                         | S/ 2,739.96                |
+| Returned key    | Rule                                                     | Example (S/ 1,290 × 2 pax) |
+| --------------- | -------------------------------------------------------- | -------------------------- |
+| `subtotal`      | `precio_base × pax`                                      | S/ 2,580.00                |
+| `descuento`     | 10% of subtotal if `pax >= 2`, else `0.00`               | S/ 258.00                  |
+| `igv`           | 18% of `(subtotal − descuento)` — Peruvian VAT           | S/ 417.96                  |
+| `total`         | `(subtotal − descuento) + igv`                           | S/ 2,739.96                |
 
 #### Payment Methods Rendered
 

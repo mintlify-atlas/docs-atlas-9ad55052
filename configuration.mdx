@@ -142,10 +142,12 @@ All settings that the agency might need to change regularly — payment details,
 
 ### Payment Gateway Keys
 
-The checkout flow reads these keys to display payment instructions and QR codes to customers. They correspond to Peru's most-used mobile payment methods and bank transfer details.
+The checkout flow reads these keys to display payment instructions and QR codes to customers. They correspond to Peru's most-used mobile payment methods, bank transfer details, and the legal text shown at checkout.
 
 | `clave` (key) | Seed value | Description |
 |---|---|---|
+| `terminos_condiciones` | *(short summary text)* | Terms and conditions text displayed at checkout for the customer to accept |
+| `politica_cancelacion` | *(short summary text)* | Cancellation policy text displayed at checkout |
 | `yape_qr_url` | `assets/img/QR/yape.jpg` | Path or URL to the Yape QR code image |
 | `yape_numero` | `921 426 968` | Yape phone number |
 | `yape_titular` | `Viajes AJT Consultores S.A.C.` | Account holder name for Yape |

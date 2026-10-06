@@ -1,5 +1,5 @@
 ---
-title: "Viajes AJT MVC Architecture and Project Structure"
+title: "Viajes AJT PHP MVC Architecture and Project Structure"
 sidebarTitle: "Architecture"
 description: "How Viajes AJT's custom PHP MVC framework is organized — PSR-4 autoloading, front controller, request lifecycle, and directory layout."
 ---
@@ -47,7 +47,7 @@ Every request flows through the following sequence before a controller method is
     `SecurityHeaders::apply()` writes all security-related HTTP headers — CSP, `X-Frame-Options`, HSTS, and others — before any output is produced. See the [Security](/reference/security) page for the full header list.
   </Step>
   <Step title="BASE_URL Calculated">
-    A `BASE_URL` constant is derived by comparing `SCRIPT_FILENAME` against `DOCUMENT_ROOT`. The `/public` path segment is stripped so that URLs work correctly whether accessed directly or through an `.htaccess` rewrite from the project root.
+    A `BASE_URL` constant is derived by comparing `SCRIPT_FILENAME` against `DOCUMENT_ROOT`. `BASE_URL` retains the `/public` path segment when the entry point is accessed directly (e.g. `http://localhost/ajt_viajes/public`). The Router and the checkout alias rewrite separately strip the leading `/public` segment from dispatch paths so routes always resolve correctly in both access modes.
 
     ```php
     $scriptFilename = str_replace('\\', '/', $_SERVER['SCRIPT_FILENAME'] ?? '');
@@ -78,7 +78,7 @@ Every request flows through the following sequence before a controller method is
     ```
   </Step>
   <Step title="CSRF Token Initialized and POST Requests Verified">
-    `Csrf::token()` is called to ensure a 64-character hex token exists in the session. For every incoming POST request (outside CLI), the token is read from `$_POST['csrf_token']` and verified with `Csrf::verifyToken()`. A mismatch returns an HTTP 403 page immediately — before any route is matched.
+    `Csrf::token()` is called to ensure a 64-character hex token exists in the session. For every incoming POST request (outside CLI), the token is read from `$_POST['csrf_token']` and verified with `Csrf::verifyToken()` (the `@deprecated` alias of `Csrf::verify()`). A mismatch returns an HTTP 403 page immediately — before any route is matched.
   </Step>
   <Step title="Routes Registered">
     A `Router` instance is created and all application routes are registered with `$router->add($path, 'Controller@method', 'HTTP_METHOD')`. Routes are grouped by feature: catalog, auth, booking, profile, visas, admin packages, admin general, contact, legal, and reclamaciones.
@@ -108,7 +108,7 @@ ajt_viajes/
 │   │   └── LocalConfig.php    # Environment constants (APP_ENV, DB_*, APP_DEBUG)
 │   │
 │   ├── Controllers/
-│   │   ├── BaseController.php # Shared helpers: render, redirect, json, setFlash, requireRole
+│   │   ├── BaseController.php # Shared helpers: render, redirect, json, setFlash, requireMethod, getDashboardPath
 │   │   ├── HomeController.php
 │   │   ├── CatalogController.php
 │   │   ├── AuthController.php

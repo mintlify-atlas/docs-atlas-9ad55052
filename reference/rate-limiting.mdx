@@ -1,5 +1,5 @@
 ---
-title: "MySQL-Backed Rate Limiting for Login and Forms"
+title: "MySQL-Backed Rate Limiting for Login and Registration"
 sidebarTitle: "Rate Limiting"
 description: "How Viajes AJT's RateLimiter class uses MySQL to enforce request limits on login, registration, and contact endpoints to prevent brute-force attacks."
 ---
@@ -100,9 +100,9 @@ public function hit(): void
 }
 ```
 
-### `check(string $action, string $redirect): bool`
+### `check(string $action = 'acción', string $redirect = '/auth/login'): bool`
 
-Combines `isLimited()` and `hit()` in one call. If limited, it sends HTTP 429, sets a `Retry-After` header, and either returns a JSON response or redirects depending on the request's `Accept` header. Never returns `false` to the caller — it `exit()`s when limited.
+Combines `isLimited()` and `hit()` in one call. If the limit has been reached it sends HTTP 429, sets a `Retry-After` header, and either returns a JSON response or redirects depending on the request's `Accept` header, then `exit()`s — the caller never receives control back. When the request is within the limit the attempt is recorded via `hit()` and the method returns `true`.
 
 ### `remainingAttempts(): int`
 
@@ -153,8 +153,13 @@ if ($ipLimiter->isLimited() || $emailLimiter->isLimited()) {
         $this->json(['error' => $message, 'remaining' => 0], 429);
     }
 
-    // HTML path: redirect with flash message
+    // HTML path: set flash, toast, and warning data, then redirect
     $this->setFlash('error', $message);
+    $_SESSION['toast'] = [
+        'type'  => 'warning',
+        'title' => 'Protección de cuenta',
+        'text'  => $message,
+    ];
     $_SESSION['rate_limit_warning'] = ['remaining' => 0, 'max' => 5, 'message' => $message];
     $this->redirect($redirectFail);
 }

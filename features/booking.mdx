@@ -1,14 +1,14 @@
 ---
-title: "Book a Tour Package: Checkout and Payment Flow"
+title: "Book a Tour Package: Checkout, Payment, and Confirmation"
 sidebarTitle: "Booking"
-description: "How the Viajes AJT booking checkout works — passenger details, payment methods (card, Yape, bank transfer), IGV calculation, and reservation confirmation."
+description: "How Viajes AJT booking checkout works — passenger details, payment methods (card, Yape, bank transfer), IGV calculation, and reservation confirmation."
 ---
 
 The Viajes AJT booking flow is a single-page checkout handled by `BookingController`. After the customer selects a package and travel date from the catalog, the checkout form collects passenger details, applies a group discount and IGV, and processes payment — all within a single atomic database transaction.
 
 ## Checkout URL
 
-```
+```http
 GET /checkout?paquete={slug}&fecha_viaje={YYYY-MM-DD}&viajeros={n}
 ```
 
@@ -36,19 +36,19 @@ The checkout view (`checkout.php`) operates in two distinct states controlled by
 `BookingController::calcularDesglose()` computes the full price breakdown from the package's `precio_base` and the number of travelers:
 
 ```php
-$subtotal       = $precio_unitario * $viajeros;
-$descuento      = ($viajeros >= 2) ? round($subtotal * 0.10, 2) : 0.00;
-$base_imponible = $subtotal - $descuento;
-$igv            = round($base_imponible * 0.18, 2);
-$total          = round($base_imponible + $igv, 2);
+$subtotal      = $precioUnitario * $pax;
+$descuento     = ($pax >= 2) ? round($subtotal * 0.10, 2) : 0.00;
+$baseImponible = $subtotal - $descuento;
+$igv           = round($baseImponible * 0.18, 2);
+$total         = round($baseImponible + $igv, 2);
 ```
 
 | Concept | Rule |
 |---------|------|
 | **Subtotal** | `precio_base × number_of_travelers` |
 | **Group discount** | 10% off subtotal when `viajeros >= 2` |
-| **IGV** | 18% of the discounted base (`base_imponible`) |
-| **Total charged** | `base_imponible + igv` |
+| **IGV** | 18% of the discounted base (`baseImponible`) |
+| **Total charged** | `baseImponible + igv` |
 
 The currency symbol (`S/` by default) is loaded from the `configuracion` table (`moneda_simbolo` key).
 
@@ -115,13 +115,13 @@ For `yape` and `trans` payments, the customer uploads proof of payment. The file
 | MIME type | Verified with `finfo(FILEINFO_MIME_TYPE)` — must be `image/jpeg`, `image/png`, or `application/pdf` |
 
 **Saved filename format:**
-```
+```text
 C-{6-digit-reservation-number}.{ext}
 ```
 **Saved path:** `public/uploads/comprobantes/`
 
 The URL stored in `pagos.comprobante_url` is:
-```
+```text
 uploads/comprobantes/C-{6-digit}.{ext}
 ```
 
@@ -151,7 +151,7 @@ Example: `AJT-482951`
 
 `Reserva::create()` wraps all inserts in a single PDO transaction. If any step fails, the entire operation is rolled back and `null` is returned.
 
-```
+```sql
 BEGIN TRANSACTION
   1. INSERT INTO reservas          → id_reserva
   2. INSERT INTO detalle_reservas  → id_detalle

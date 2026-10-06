@@ -1,7 +1,7 @@
 ---
 title: "Security Features: CSRF, Headers, and Session Protection"
 sidebarTitle: "Security"
-description: "Viajes AJT's layered security model — CSRF token validation, HTTP security headers, bcrypt password hashing, session hardening, and role-based access control."
+description: "Viajes AJT's layered security model: CSRF tokens, HTTP security headers, bcrypt password hashing, session hardening, and role-based access control."
 ---
 
 Viajes AJT applies a defense-in-depth approach: every request passes through multiple independent security layers before any application logic runs. Security headers are applied before routing, CSRF tokens are validated before controller dispatch, and database queries always use PDO prepared statements. This page documents each layer in detail.
@@ -97,7 +97,9 @@ if (PHP_SAPI !== 'cli' && ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 A request with a missing, empty, or mismatched token receives HTTP 403 and never reaches a controller.
 
 <Warning>
-  `Csrf::verifyToken()` is marked `@deprecated` — it is an alias of `verify()` kept for backwards compatibility. New controller code should call `Csrf::verify()` or `Csrf::validate()` directly.
+  Two methods are marked `@deprecated` and kept only for backwards compatibility:
+  - `Csrf::verifyToken(?string $token): bool` — alias of `verify(string $token)`. Called in `index.php` for the global POST check; new controller code should call `Csrf::verify()` or `Csrf::validate()` directly.
+  - `Csrf::insertInput(): string` — alias of `field()`. New templates should call `Csrf::field()` instead.
 </Warning>
 
 ---

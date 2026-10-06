@@ -102,32 +102,31 @@ On success, the confirmation message includes a human-readable label:
 
 ```php
 $labels = ['pendiente' => 'Pendiente', 'pagado' => 'Confirmada', 'cancelado' => 'Cancelada'];
-$_SESSION['success'] = "Reserva actualizada a estado '" . ($labels[$nuevo_estado] ?? $nuevo_estado) . "' con éxito.
-El pago asociado también fue sincronizado.";
+$_SESSION['success'] = "Reserva actualizada a estado '" . ($labels[$nuevo_estado] ?? $nuevo_estado) . "' con éxito. El pago asociado también fue sincronizado.";
 ```
 
 ## Payment Methods
 
-Payment method IDs are stored in `pagos.id_metodo_pago` and resolved via the `metodos_pago` table:
+Payment method IDs are stored in `pagos.id_metodo_pago` and resolved via the `metodos_pago` table. The seeded rows are:
 
-| `id_metodo` | Name | Description |
+| `id_metodo` | `nombre` | Description |
 |---|---|---|
-| `1` | Tarjeta | Credit or debit card |
-| `2` | Transferencia | Bank wire transfer |
-| `3` | Yape/Plin | Mobile wallet (Yape or Plin) |
+| `1` | `Tarjeta de Crédito / Débito` | Credit or debit card |
+| `2` | `Transferencia Bancaria` | Bank wire transfer |
+| `3` | `Yape / Plin` | Mobile wallet (Yape or Plin) |
 
 ## Payment Receipts (Comprobantes)
 
-When a customer submits a payment, they upload a proof-of-payment file. The file path is stored as `comprobante_url` in the `pagos` table and follows the naming convention:
+When a customer submits a payment, they upload a proof-of-payment file. The file is saved inside `public/uploads/comprobantes/` and the relative path stored in `pagos.comprobante_url` follows the naming convention:
 
 ```
-public/uploads/comprobantes/C-{codigo_reserva}.{ext}
+uploads/comprobantes/C-{reservaNum}.{ext}
 ```
 
-For example, reservation `AJT-483921` would have its receipt at:
+where `{reservaNum}` is the 6-digit numeric portion of the reservation code. For example, reservation `AJT-483921` would have its receipt stored as:
 
 ```
-public/uploads/comprobantes/C-AJT-483921.jpg
+uploads/comprobantes/C-483921.jpg
 ```
 
 Customers can also view their own receipt through their profile at:

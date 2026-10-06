@@ -1,5 +1,5 @@
 ---
-title: "Tour Package Catalog: Browse, Search, and Filter"
+title: "Tour Package Catalog: Browse, Search, and Filter Trips"
 sidebarTitle: "Tour Catalog"
 description: "Explore Viajes AJT's tour package catalog. Browse all packages at /catalog, view full details at /paquete/{slug}, and search live via the JSON API."
 ---
@@ -38,7 +38,7 @@ The catalog supports the following URL query parameters:
 
 ### Example Filter URL
 
-```
+```text
 /catalog?q=cusco&precio_max=2500&duracion[]=4-7&orden=precio_asc
 ```
 
@@ -110,10 +110,10 @@ Images for each package are stored in the `paquete_imagenes` table. The main ima
 
 All images are automatically resized via `ImageUrlService` before being sent to the frontend:
 
-| Context | Target width | Method |
-|---------|-------------|--------|
-| Catalog listing | 800 px | `ImageUrlService::catalogOptimize()` |
-| Package detail | 1200 px, quality 80 | `ImageUrlService::optimize()` |
+| Context | Target width | Quality | Method |
+|---------|-------------|---------|--------|
+| Catalog listing | 800 px | 75 | `ImageUrlService::catalogOptimize()` |
+| Package detail | 1200 px | 80 | `ImageUrlService::optimize()` |
 
 <Tip>
   The Unsplash fallback URLs already include Unsplash's `fit=crop` and `q=80` parameters. `ImageUrlService` overrides the `w=` parameter to enforce the correct size for each context.

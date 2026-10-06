@@ -1,7 +1,7 @@
 ---
 title: "Install Viajes AJT on Apache and MySQL"
 sidebarTitle: "Installation"
-description: "Step-by-step guide to deploy Viajes AJT locally or on a production server using Apache, PHP 8, and MySQL."
+description: "Install Viajes AJT on Apache, PHP 8, and MySQL. Set up the virtual host, enable mod_rewrite, import the schema and seed, then verify your first page load."
 ---
 
 Viajes AJT is a full-stack PHP travel agency platform built on a custom MVC architecture with a PSR-4 autoloader, a front-controller entry point, and a MySQL relational database. This guide walks you through every step needed to get the application running on an Apache + PHP 8 + MySQL stack — from cloning the repository to verifying your first page load.
@@ -142,7 +142,7 @@ The database is created and populated by two SQL files that must be executed **i
 mysql -u root -p < database/schema.sql
 ```
 
-This creates the `viajes_ajt_3fn` database with `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` and defines all 16 tables, including `paquetes`, `reservas`, `usuarios`, `configuracion`, and the supporting lookup tables.
+This creates the `viajes_ajt_3fn` database with `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` and defines all 25 tables, including `paquetes`, `reservas`, `usuarios`, `configuracion`, and the supporting lookup tables.
 
 **Step 2 — Run the seed** (populates initial and demo data):
 
