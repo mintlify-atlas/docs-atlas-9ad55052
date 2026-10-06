@@ -1,0 +1,552 @@
+---
+title: "Booking and Profile API Endpoints Reference"
+sidebarTitle: "Booking API"
+description: "HTTP endpoints for Viajes AJT checkout, reservation processing, user profile management, and visa advisory requests."
+---
+
+This reference covers all transactional endpoints in Viajes AJT: the two-step checkout flow (`GET /checkout` → `POST /booking/procesar-checkout`), user profile management, visa advisory requests, and the complaint (libro de reclamaciones) system. All booking and profile endpoints require an active authenticated session. Visa solicitation and complaint submission also require login; the catalog page for visas is public.
+
+<Note>
+  **CSRF protection is enforced globally on every `POST` request.** All forms
+  must include a hidden `csrf_token` field whose value matches the token stored
+  in the current session. Requests missing or with an invalid token receive
+  `HTTP 403`.
+</Note>
+
+---
+
+## Checkout Flow
+
+### `GET /checkout`
+
+Renders the multi-step checkout form (Step 1 / Step 2). Loads the package data, calculates the financial breakdown, and retrieves payment configuration from the `configuracion` table. Unauthenticated users are redirected to login with their booking intent preserved in session.
+
+#### Request
+
+```http
+GET /checkout?paquete=cusco-valle-sagrado-machu-picchu&fecha_viaje=2025-09-15&viajeros=2 HTTP/1.1
+Host: yourdomain.com
+```
+
+The path alias `GET /checkout/{slug}` is also supported — the router rewrites it to `GET /checkout?paquete={slug}` automatically.
+
+#### Query Parameters
+
+<ParamField query="paquete" type="string" required>
+  Package slug (URL-friendly identifier, e.g., `cusco-valle-sagrado-machu-picchu`).
+  Must match an existing, available (`disponible = 1`) package in `paquetes.slug`.
+</ParamField>
+
+<ParamField query="fecha_viaje" type="string">
+  Desired travel date in `YYYY-MM-DD` format. Passed through to the checkout form
+  as a pre-filled value for the date picker.
+</ParamField>
+
+<ParamField query="viajeros" type="integer">
+  Number of travelers. Used to calculate the financial breakdown displayed in the
+  form. Defaults to `1` if omitted.
+</ParamField>
+
+#### Authentication & Redirect
+
+When no active session exists:
+
+1. The booking intent is saved to session:
+
+```php
+$_SESSION['pending_booking'] = [
+    'paquete'     => $slug,
+    'fecha_viaje' => $fecha_viaje,
+    'viajeros'    => $viajeros,
+];
+```
+
+2. Flash error: *"Debe iniciar sesión para realizar una reserva."*
+3. Redirect → `GET /login`
+
+After the user logs in or registers, `POST /auth/login` and `POST /auth/registro` both check `$_SESSION['pending_booking']` and resume the checkout automatically.
+
+#### Financial Breakdown
+
+The checkout page displays a live financial breakdown computed by `BookingController::calcularDesglose()`:
+
+```php
+// Given: $precioUnitario (package precio_base), $pax (viajeros count)
+
+$subtotal       = $precioUnitario * $pax;
+$descuento      = ($pax >= 2) ? round($subtotal * 0.10, 2) : 0.00;
+$baseImponible  = $subtotal - $descuento;
+$igv            = round($baseImponible * 0.18, 2);
+$total          = round($baseImponible + $igv, 2);
+```
+
+| Line item       | Rule                                          | Example (S/ 1,290 × 2 pax) |
+| --------------- | --------------------------------------------- | -------------------------- |
+| `subtotal`      | `precio_base × pax`                           | S/ 2,580.00                |
+| `descuento`     | 10% of subtotal if `pax >= 2`, else `0.00`    | S/ 258.00                  |
+| `baseImponible` | `subtotal − descuento`                        | S/ 2,322.00                |
+| `igv`           | 18% of `baseImponible` (Peruvian VAT)         | S/ 417.96                  |
+| `total`         | `baseImponible + igv`                         | S/ 2,739.96                |
+
+#### Payment Methods Rendered
+
+The checkout form renders three payment options sourced from `configuracion`:
+
+<CardGroup cols={3}>
+  <Card title="Tarjeta (card)" icon="credit-card">
+    Credit/debit card. Reservation is confirmed immediately (`estado = pagado`,
+    `pago.estado = validado`).
+  </Card>
+  <Card title="Yape/Plin (yape)" icon="qrcode">
+    Yape or Plin QR transfer. Customer uploads a payment receipt image.
+    Reservation stays `pendiente` pending manual admin validation.
+  </Card>
+  <Card title="Transferencia (trans)" icon="building-columns">
+    Bank transfer. Customer uploads a payment receipt. Same pending flow
+    as Yape.
+  </Card>
+</CardGroup>
+
+---
+
+### `POST /booking/procesar-checkout`
+
+Processes the checkout form submission. Validates all input, uploads the payment receipt (when required), and creates the complete reservation in a single database transaction covering four tables: `reservas`, `detalle_reservas`, `viajeros_reserva`, and `pagos`.
+
+#### Request
+
+```http
+POST /booking/procesar-checkout HTTP/1.1
+Host: yourdomain.com
+Content-Type: multipart/form-data
+
+paquete_slug=cusco-valle-sagrado-machu-picchu
+fecha_viaje=2025-09-15
+viajeros_count=2
+pay=yape
+nombres_viajero[]=Ana María
+apellidos_viajero[]=García López
+documento_viajero[]=12345678
+nombres_viajero[]=Carlos
+apellidos_viajero[]=Quispe Ramos
+documento_viajero[]=87654321
+telefono_pasajero=987654321
+acepta_terminos=on
+comprobante=<file>
+csrf_token=<token>
+```
+
+#### Body Parameters
+
+<ParamField body="paquete_slug" type="string" required>
+  Package slug. Must match an existing, available package.
+</ParamField>
+
+<ParamField body="fecha_viaje" type="string" required>
+  Travel date in `YYYY-MM-DD` format. Must be a **future** date (strictly after
+  today). Validated with `DateTime::createFromFormat('Y-m-d', ...)`.
+</ParamField>
+
+<ParamField body="viajeros_count" type="integer" required>
+  Number of travelers. Must be an integer between `1` and `10` (inclusive).
+</ParamField>
+
+<ParamField body="pay" type="string" required>
+  Payment method. Must be one of `card`, `yape`, or `trans`. Any other value is
+  silently replaced with `card` as a safe fallback.
+</ParamField>
+
+<ParamField body="card_last4" type="string">
+  Last 4 digits of the card. Only relevant when `pay = card`. Non-digit
+  characters are stripped; only the final 4 digits are stored as
+  `TARJETA-XXXX` in `pagos.numero_operacion`. The full card number is **never**
+  stored.
+</ParamField>
+
+<ParamField body="nombres_viajero[]" type="string[]" required>
+  Array of first names, one entry per traveler. Each value must be non-empty,
+  letters and spaces only (`/^[\p{L}\s]+$/u`), max 100 characters.
+</ParamField>
+
+<ParamField body="apellidos_viajero[]" type="string[]" required>
+  Array of last names, one entry per traveler. Same rules as `nombres_viajero[]`.
+</ParamField>
+
+<ParamField body="documento_viajero[]" type="string[]" required>
+  Array of document numbers (DNI or passport), one per traveler. Each must be
+  6–20 alphanumeric characters (`/^[A-Za-z0-9]+$/`).
+</ParamField>
+
+<ParamField body="telefono_pasajero" type="string" required>
+  Contact phone number of the lead passenger. Must yield 7–15 digits after
+  stripping whitespace (`/^[0-9]{7,15}$/`).
+</ParamField>
+
+<ParamField body="acepta_terminos" type="string" required>
+  Terms and conditions acceptance checkbox. Must have value `on`.
+</ParamField>
+
+<ParamField body="comprobante" type="file">
+  Payment receipt file. **Required when `pay` is `yape` or `trans`**.
+  Constraints:
+  - Maximum size: **5 MB**
+  - Allowed extensions: `jpg`, `jpeg`, `png`, `pdf`
+  - Allowed MIME types: `image/jpeg`, `image/png`, `application/pdf`
+
+  The file is saved to `public/uploads/comprobantes/` as
+  `C-{reservaNum}.{ext}` and the relative path is stored in `pagos.comprobante_url`.
+</ParamField>
+
+#### Reservation Code
+
+A unique reservation code is generated **before** any database writes:
+
+```php
+$reservaNum   = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+$codigoReserva = 'AJT-' . $reservaNum;  // e.g., "AJT-083742"
+```
+
+The code is stored in `reservas.codigo_reserva` (UNIQUE constraint) and is used to name the uploaded receipt file.
+
+#### Database Transaction
+
+On successful validation, `Reserva::create()` opens a transaction and inserts into four tables atomically:
+
+```sql
+-- 1. Reservation header
+INSERT INTO reservas
+  (id_usuario, codigo_reserva, descuento, estado, telefono_pasajero, created_at)
+VALUES (:id_usuario, :codigo, :descuento, :estado, :telefono_pasajero, NOW());
+
+-- 2. Reservation detail (one row per reservation)
+INSERT INTO detalle_reservas
+  (id_reserva, id_paquete, fecha_viaje, cantidad_pasajeros, precio_unitario)
+VALUES (:id_reserva, :id_paquete, :fecha_viaje, :cantidad_pasajeros, :precio_unitario);
+
+-- 3. Traveler records (one row per viajero)
+INSERT INTO viajeros_reserva
+  (id_detalle, nombres, apellidos, num_documento)
+VALUES (:id_detalle, :nombres, :apellidos, :num_documento);
+
+-- 4. Payment record
+INSERT INTO pagos
+  (id_usuario, id_metodo_pago, id_reserva, numero_operacion, monto, estado, comprobante_url, created_at)
+VALUES (:id_usuario, :id_metodo_pago, :id_reserva, :numero_operacion, :monto, :estado, :comprobante_url, NOW());
+```
+
+#### Payment Method Mapping
+
+| `pay` value | `id_metodo_pago` | `reservas.estado` | `pagos.estado` |
+| ----------- | ---------------- | ----------------- | -------------- |
+| `card`      | `1` (Tarjeta)    | `pagado`          | `validado`     |
+| `trans`     | `2` (Transferencia) | `pendiente`    | `pendiente`    |
+| `yape`      | `3` (Yape/Plin)  | `pendiente`       | `pendiente`    |
+
+#### Success Response
+
+On successful creation, the server renders the confirmation view (Step 3 of checkout) with `HTTP 200`, displaying:
+
+- Reservation code (e.g., `AJT-083742`)
+- Package name, travel date, and passenger count
+- Financial breakdown (subtotal, discount, IGV, total)
+- Payment status and method
+
+#### Failure Response
+
+Validation errors are joined with `<br>` and stored in `$_SESSION['error']`. The user is redirected back to `GET /checkout?paquete=...` with the error displayed.
+
+---
+
+## Profile Endpoints
+
+All `/profile/*` routes require an active client session (`id_rol = 1`). The `ProfileController` constructor checks the session and redirects unauthenticated requests to `/login` with a flash error.
+
+### `GET /profile/mi-perfil`
+
+<Note>
+  Alias: `GET /perfil`. Both routes dispatch to `ProfileController@miPerfil`.
+</Note>
+
+Renders the authenticated user's dashboard, displaying their account details, full booking history, and visa advisory applications.
+
+#### Request
+
+```http
+GET /profile/mi-perfil HTTP/1.1
+Host: yourdomain.com
+Cookie: VIAJESAJTSESSID=<session_id>
+```
+
+#### Data Loaded
+
+| Dataset             | Source Model / Method          | Description                                       |
+| ------------------- | ------------------------------ | ------------------------------------------------- |
+| User account        | `Usuario::findById($id)`       | Full user row from `usuarios`                     |
+| Booking history     | `Reserva::findByUsuario($id)`  | All reservations with package name, payment state |
+| Visa applications   | `Visa::findByUsuario($id)`     | All `solicitudes_visa` for this user              |
+
+---
+
+### `POST /profile/guardar-cuenta`
+
+Updates the authenticated user's account details. Only `nombres`, `apellidos`, `telefono`, and `dni_pasaporte` can be changed — email and password have their own flows.
+
+#### Body Parameters
+
+<ParamField body="nombres" type="string" required>
+  Updated first name(s). 2–100 characters, letters and spaces only.
+</ParamField>
+
+<ParamField body="apellidos" type="string" required>
+  Updated last name(s). 2–100 characters, letters and spaces only.
+</ParamField>
+
+<ParamField body="telefono" type="string">
+  Updated phone number. Optional; when provided must yield 7–15 digits. Non-digit
+  characters are stripped before saving.
+</ParamField>
+
+<ParamField body="dni_pasaporte" type="string">
+  Updated document number. Optional; when provided must be 6–20 characters.
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF token.
+</ParamField>
+
+On success, `$_SESSION['usuario']['nombres']` and `$_SESSION['usuario']['apellidos']` are also updated in the current session. Redirects to `GET /profile/mi-perfil` with a flash success or error message.
+
+---
+
+### `POST /profile/cambiar-password`
+
+Changes the authenticated user's password. Requires the current password to be provided for verification.
+
+#### Body Parameters
+
+<ParamField body="password_actual" type="string" required>
+  Current password. Verified against the stored bcrypt hash with
+  `password_verify()`. If incorrect, the request is rejected with a flash error.
+</ParamField>
+
+<ParamField body="password_nueva" type="string" required>
+  New password. Minimum 6 characters.
+</ParamField>
+
+<ParamField body="password_confirm" type="string" required>
+  Confirmation of the new password. Must match `password_nueva` exactly.
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF token.
+</ParamField>
+
+On success, the new password is hashed with `PASSWORD_BCRYPT` and stored via `Usuario::cambiarPassword()`. Redirects to `GET /profile/mi-perfil`.
+
+---
+
+### `GET /profile/comprobante/{codigo}`
+
+Serves the printable booking voucher for the specified reservation code. The reservation must belong to the currently authenticated user.
+
+#### Path Parameters
+
+<ParamField path="codigo" type="string" required>
+  The reservation code in `AJT-XXXXXX` format (e.g., `AJT-083742`). Looked up
+  via `Reserva::findByCodigo($codigo, $id_usuario)` — ownership is enforced
+  at the query level.
+</ParamField>
+
+#### Response
+
+| Condition                             | HTTP Status | Action                                      |
+| ------------------------------------- | ----------- | ------------------------------------------- |
+| Found and owned by current user       | `200`       | Renders printable voucher HTML              |
+| Not found or belongs to another user  | `404`       | Error page                                  |
+| Database error                        | `500`       | Error page                                  |
+
+The voucher view receives the complete reservation object including traveler list (`viajeros_reserva` rows), package details, payment information, and a recalculated financial breakdown identical to the checkout breakdown formula.
+
+---
+
+## Visa Advisory Endpoints
+
+### `GET /visas`
+
+Public page. Renders the visa advisory services catalog. No authentication required.
+
+### `POST /visas/solicitar`
+
+Creates a new visa advisory application (`solicitudes_visa`). Authentication is required — unauthenticated users are redirected to login with their visa intent saved in `$_SESSION['pending_visa']`.
+
+#### Request
+
+```http
+POST /visas/solicitar HTTP/1.1
+Host: yourdomain.com
+Content-Type: application/x-www-form-urlencoded
+
+id_servicio=3&fecha_viaje_aprox=2025-11-01&csrf_token=<token>
+```
+
+#### Body Parameters
+
+<ParamField body="id_servicio" type="integer" required>
+  ID of the visa service from the `servicios_visa` table. Must be a positive
+  integer greater than 0.
+</ParamField>
+
+<ParamField body="fecha_viaje_aprox" type="string">
+  Approximate travel date (`YYYY-MM-DD`). Optional — stored in
+  `solicitudes_visa.fecha_viaje_aprox` as a `DATE` column (nullable).
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF token.
+</ParamField>
+
+#### Success Response
+
+A unique tracking code is generated by `Visa::createSolicitud()` and stored in `solicitudes_visa.codigo_solicitud`. On success:
+
+- Flash message: *"¡Trámite de visa registrado con éxito! Código de seguimiento: {codigo}"*
+- Redirect → `GET /profile/mi-perfil#tramites`
+
+#### Failure Response
+
+Flash error + redirect to `GET /visas`.
+
+---
+
+### `POST /admin/visas/update-estado`
+
+<Warning>
+  Admin only (`id_rol = 2`). Requests from non-admin sessions receive a flash
+  error and are redirected to `/auth/login`.
+</Warning>
+
+Updates the processing status of a visa application.
+
+#### Body Parameters
+
+<ParamField body="id_solicitud" type="integer" required>
+  ID of the `solicitudes_visa` record to update. Must be a positive integer.
+</ParamField>
+
+<ParamField body="estado" type="string" required>
+  New status value. Must be one of the following ENUM values defined in the
+  `solicitudes_visa` table:
+
+  | Value                   | Meaning                                      |
+  | ----------------------- | -------------------------------------------- |
+  | `nueva`                 | Application just received                    |
+  | `contactado`            | Client has been contacted                    |
+  | `documentos_pendientes` | Awaiting documents from client               |
+  | `en_revision`           | Documents under review                       |
+  | `en_tramite`            | Application submitted to embassy/consulate   |
+  | `aprobada`              | Visa approved                                |
+  | `rechazada`             | Visa rejected                                |
+  | `cancelada`             | Application cancelled                        |
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF token.
+</ParamField>
+
+On success, redirects to `GET /admin/visas` with a flash confirmation. Invalid `id_solicitud` or unrecognised `estado` values redirect with a flash error.
+
+---
+
+## Reclamaciones (Complaints — Libro de Reclamaciones)
+
+The complaint system complies with Peruvian consumer protection law (Ley N.° 29571). Only authenticated users who have made at least one purchase, reservation, or service request (`Reclamacion::hasActiveServices()`) may submit a complaint.
+
+### `GET /reclamaciones`
+
+Public page. Renders the complaint submission form. Authenticated users also see their own complaint history.
+
+### `POST /reclamaciones`
+
+Submits a new complaint or suggestion. Authentication is required.
+
+#### Body Parameters
+
+<ParamField body="tipo" type="string" required>
+  Type of submission. Must be `reclamo` (complaint) or `sugerencia` (suggestion).
+</ParamField>
+
+<ParamField body="categoria" type="string" required>
+  Category of the complaint (e.g., service type, package name). Non-empty string.
+</ParamField>
+
+<ParamField body="descripcion" type="string" required>
+  Full description of the complaint or suggestion. Non-empty text.
+</ParamField>
+
+<ParamField body="pedido_cliente" type="string">
+  Client's requested resolution. Optional free-text field stored as `TEXT` (nullable).
+</ParamField>
+
+<ParamField body="medio_respuesta" type="string" required>
+  Preferred response channel. Must be one of `whatsapp`, `correo`, or `telefono`.
+  Defaults to `correo`.
+</ParamField>
+
+<ParamField body="reserva_id" type="integer">
+  Optional ID of a related reservation. When provided, ownership is verified —
+  the reservation must belong to the authenticated user.
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF token.
+</ParamField>
+
+On success, the new record's auto-increment ID is formatted as a 5-digit complaint number (e.g., `00042`) and shown in a flash message. Redirects to `GET /reclamaciones`.
+
+---
+
+### `GET /admin/reclamaciones`
+
+<Warning>
+  Admin only (`id_rol = 2`).
+</Warning>
+
+Renders the admin panel listing all complaints from all users, ordered by submission date.
+
+---
+
+### `POST /admin/reclamaciones/update-estado`
+
+<Warning>
+  Admin only (`id_rol = 2`).
+</Warning>
+
+Updates the status and optionally adds an admin response to a complaint record.
+
+#### Body Parameters
+
+<ParamField body="id" type="integer" required>
+  ID of the `reclamaciones` record. Must be a positive integer.
+</ParamField>
+
+<ParamField body="estado" type="string" required>
+  New status. Must be one of the ENUM values from the `reclamaciones` table:
+
+  | Value          | Meaning                                    |
+  | -------------- | ------------------------------------------ |
+  | `nuevo`        | Complaint just submitted                   |
+  | `en_revision`  | Under internal review                      |
+  | `respondido`   | Admin has responded to the client          |
+  | `cerrado`      | Case closed                                |
+</ParamField>
+
+<ParamField body="respuesta_admin" type="string">
+  Optional admin response text. Stored in `reclamaciones.respuesta_admin`
+  (`TEXT`, nullable). When empty, the field is set to `NULL`.
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF token.
+</ParamField>
+
+On success, a flash confirmation shows the zero-padded complaint number (e.g., *"Reclamación #00042 actualizada."*). Redirects to `GET /admin/reclamaciones`.

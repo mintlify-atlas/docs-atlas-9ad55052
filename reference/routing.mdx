@@ -1,0 +1,191 @@
+---
+title: "URL Routing: How Viajes AJT Dispatches Requests"
+sidebarTitle: "Routing"
+description: "How Viajes AJT's custom Router class registers routes, resolves URI parameters, and dispatches to controller methods with support for dynamic segments."
+---
+
+Viajes AJT uses a custom `App\Config\Router` class that maps URL patterns to `Controller@method` handlers. There is no third-party routing library — the entire implementation is under 60 lines of PHP. Routes are registered once in `public/index.php` at bootstrap time, then dispatched against the incoming request URI.
+
+## Registering Routes
+
+Routes are added with `Router::add()`:
+
+```php
+public function add(string $route, string $handler, string $method = 'GET'): void
+```
+
+- **`$route`** — the URL path relative to `BASE_URL`, without a leading slash. For example `'paquete/{slug}'` or `'admin/paquetes/edit/{id}'`.
+- **`$handler`** — a string in `"ControllerName@methodName"` format. The controller class is resolved as `App\Controllers\{ControllerName}`.
+- **`$method`** — the HTTP verb (`'GET'` or `'POST'`). Defaults to `'GET'`.
+
+The same path can be registered for both `GET` and `POST` by calling `add()` twice:
+
+```php
+$router->add('login', 'AuthController@login',         'GET');
+$router->add('login', 'AuthController@procesarLogin', 'POST');
+```
+
+Routes are stored in a two-level array keyed by HTTP method then route pattern, so GET and POST routes never collide.
+
+## Dynamic Segments
+
+Use `{paramName}` placeholders in the route pattern to capture variable URL segments. The Router converts each `{param}` token into a `([^/]+)` regex capture group:
+
+```php
+// Registration
+$router->add('paquete/{slug}', 'CatalogController@detail', 'GET');
+
+// Internally compiled to:
+// #^paquete/([^/]+)$#
+
+// Dispatched as:
+$controller->detail($slug);
+```
+
+Captured values are passed positionally as arguments to the controller method in the order they appear in the pattern. A route like `admin/paquetes/edit/{id}` passes the `{id}` segment as the first argument to `PaqueteController::editar(string $id)`.
+
+## How dispatch() Works
+
+`Router::dispatch(string $uri)` resolves the request:
+
+1. Extracts the path component from the URI with `parse_url($uri, PHP_URL_PATH)`.
+2. Strips the project subdirectory prefix (derived from `SCRIPT_FILENAME` vs `DOCUMENT_ROOT`) so routes work correctly under XAMPP and similar subdirectory deployments.
+3. Strips a leading `/public` segment if present (supports direct `/public/` access).
+4. Trims the resulting path of slashes.
+5. Iterates the registered routes for the current HTTP method, compiling each pattern to a regex with `{param}` → `([^/]+)`.
+6. On a match, instantiates `App\Controllers\{ControllerName}` and calls `{actionName}` via `call_user_func_array`, forwarding the captured segments as arguments.
+7. Falls through to HTTP 404 and renders `app/Views/errors/404.php` if no route matches.
+
+```php
+[$controllerName, $actionName] = explode('@', $handler);
+$controllerClass = "App\\Controllers\\" . $controllerName;
+
+if (class_exists($controllerClass)) {
+    $controller = new $controllerClass();
+    if (method_exists($controller, $actionName)) {
+        call_user_func_array([$controller, $actionName], $matches);
+        return;
+    }
+}
+```
+
+## Checkout Slug Alias
+
+Before `dispatch()` is called, `index.php` rewrites pretty checkout URLs to the canonical query-string form:
+
+```php
+// /checkout/viaje-a-paris  →  /checkout?paquete=viaje-a-paris
+if ($_SERVER['REQUEST_METHOD'] === 'GET' &&
+    preg_match('#^checkout/([^/]+)$#', $normalizedPath, $matches)) {
+    $slug = urldecode($matches[1]);
+    $_GET['paquete'] = $slug;
+    $_REQUEST['paquete'] = $slug;
+    $dispatchUri = BASE_URL . '/checkout?paquete=' . rawurlencode($slug);
+}
+```
+
+`BookingController::checkout()` then reads `$_GET['paquete']` normally — it never sees the slash-based form.
+
+## Complete Route Table
+
+All routes registered in `public/index.php`, grouped by feature area:
+
+<Tabs>
+  <Tab title="Home & Catalog">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `` (empty) | `HomeController@index` |
+    | GET | `index.php` | `HomeController@index` |
+    | GET | `catalog` | `CatalogController@index` |
+    | GET | `catalogo` | `CatalogController@index` |
+    | GET | `paquete/{slug}` | `CatalogController@detail` |
+    | GET | `api/paquetes/buscar` | `CatalogController@searchJson` |
+  </Tab>
+  <Tab title="Auth">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `login` | `AuthController@login` |
+    | POST | `login` | `AuthController@procesarLogin` |
+    | GET | `auth/login` | `AuthController@login` |
+    | POST | `auth/login` | `AuthController@procesarLogin` |
+    | GET | `admin/login` | `AuthController@showAdminLogin` |
+    | POST | `admin/login` | `AuthController@procesarAdminLogin` |
+    | GET | `auth/registro` | `AuthController@registro` |
+    | POST | `auth/registro` | `AuthController@procesarRegistro` |
+    | GET | `registro` | `AuthController@registro` |
+    | GET | `logout` | `AuthController@logoutGet` |
+    | GET | `auth/logout` | `AuthController@logoutGet` |
+    | POST | `logout` | `AuthController@logout` |
+    | POST | `auth/logout` | `AuthController@logout` |
+    | GET | `seleccionar-panel` | `AuthController@seleccionarPanel` |
+    | GET | `api/validar-email` | `AuthController@validateEmail` |
+  </Tab>
+  <Tab title="Booking & Profile">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `checkout` | `BookingController@checkout` |
+    | POST | `booking/procesar-checkout` | `BookingController@procesarCheckout` |
+    | GET | `profile/mi-perfil` | `ProfileController@miPerfil` |
+    | GET | `perfil` | `ProfileController@miPerfil` |
+    | POST | `profile/guardar-cuenta` | `ProfileController@guardarCuenta` |
+    | POST | `profile/cambiar-password` | `ProfileController@cambiarPassword` |
+    | GET | `profile/comprobante/{codigo}` | `ProfileController@comprobante` |
+  </Tab>
+  <Tab title="Visas">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `visas` | `VisaController@index` |
+    | POST | `visas/solicitar` | `VisaController@procesarSolicitud` |
+    | GET | `admin/visas` | `VisaController@adminIndex` |
+    | POST | `admin/visas/update-estado` | `VisaController@adminUpdateEstado` |
+  </Tab>
+  <Tab title="Admin Packages">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `admin/paquetes` | `PaqueteController@index` |
+    | GET | `admin/paquetes/create` | `PaqueteController@crear` |
+    | POST | `admin/paquetes/store` | `PaqueteController@guardar` |
+    | GET | `admin/paquetes/edit/{id}` | `PaqueteController@editar` |
+    | POST | `admin/paquetes/update/{id}` | `PaqueteController@actualizar` |
+    | POST | `admin/paquetes/delete/{id}` | `PaqueteController@eliminar` |
+    | POST | `admin/paquetes/toggle-disponible/{id}` | `PaqueteController@toggleDisponible` |
+  </Tab>
+  <Tab title="Admin General">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `admin/dashboard` | `AdminController@dashboard` |
+    | GET | `admin/ventas` | `AdminController@ventas` |
+    | GET | `admin/ventas/exportar` | `AdminController@exportarVentas` |
+    | GET | `admin/reservas` | `AdminController@reservas` |
+    | POST | `admin/reservas/cambiar-estado` | `AdminController@cambiarEstadoReserva` |
+    | GET | `admin/reservas/exportar` | `AdminController@exportarReservas` |
+    | GET | `admin/usuarios` | `AdminController@usuarios` |
+    | POST | `admin/usuarios/registrar-administrador` | `AdminController@registrarAdministrador` |
+    | POST | `admin/usuarios/update-rol` | `AdminController@updateRol` |
+    | GET | `admin/ajustes` | `AdminController@ajustes` |
+    | POST | `admin/ajustes` | `AdminController@guardarAjustes` |
+    | POST | `admin/ajustes/cambiar-password` | `AdminController@cambiarPassword` |
+  </Tab>
+  <Tab title="Reclamaciones & Legal">
+    | Method | Pattern | Handler |
+    |---|---|---|
+    | GET | `reclamaciones` | `ReclamacionController@index` |
+    | POST | `reclamaciones` | `ReclamacionController@store` |
+    | GET | `admin/reclamaciones` | `ReclamacionController@adminIndex` |
+    | POST | `admin/reclamaciones/update-estado` | `ReclamacionController@adminUpdate` |
+    | GET | `contacto` | `ContactoController@index` |
+    | POST | `contacto` | `ContactoController@enviar` |
+    | GET | `terminos` | `LegalController@terminos` |
+    | GET | `privacidad` | `LegalController@privacidad` |
+    | GET | `cancelaciones` | `LegalController@cancelaciones` |
+    | GET | `libro-reclamaciones` | `LegalController@reclamaciones` |
+  </Tab>
+</Tabs>
+
+<Note>
+  `catalog` and `catalogo` are intentional aliases — both route to `CatalogController@index` to support both Spanish URL spellings. Similarly, `login`/`auth/login` and `logout`/`auth/logout` are aliased pairs maintained for backwards compatibility.
+</Note>
+
+<Tip>
+  To add a new route, call `$router->add()` in `public/index.php` before `$router->dispatch()`. Create the corresponding controller in `app/Controllers/` extending `BaseController`, and the PSR-4 autoloader will find it automatically.
+</Tip>

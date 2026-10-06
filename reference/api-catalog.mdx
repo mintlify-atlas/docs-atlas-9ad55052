@@ -1,0 +1,343 @@
+---
+title: "Catalog and Package API Endpoints Reference"
+sidebarTitle: "Catalog API"
+description: "HTTP endpoints for the Viajes AJT tour catalog — browse packages, view package detail by slug, and search packages via the JSON API."
+---
+
+The catalog layer of Viajes AJT exposes three HTTP endpoints that power the public-facing tour catalog. Two of them (`GET /catalog` and `GET /paquete/{slug}`) return full HTML pages rendered server-side by `CatalogController`. The third, `GET /api/paquetes/buscar`, is the platform's dedicated JSON search API — it powers the real-time search bar and can be consumed by any HTTP client. All catalog endpoints are public and require no authentication.
+
+---
+
+## `GET /catalog`
+
+<Note>
+  This route has an alias: `GET /catalogo`. Both paths dispatch to the same
+  `CatalogController@index` handler and behave identically.
+</Note>
+
+Returns an HTML page listing all **available** (`disponible = 1`) tour packages. Results are filtered and sorted entirely server-side based on query string parameters; no JavaScript is required to apply filters.
+
+### Request
+
+```http
+GET /catalog HTTP/1.1
+Host: yourdomain.com
+```
+
+### Query Parameters
+
+All parameters are optional. When omitted, the full available catalog is returned ordered by `destacado DESC, id_paquete DESC`.
+
+<ParamField query="q" type="string">
+  Full-text search term. Matched against `nombre`, `ciudad_nombre`,
+  `categoria_nombre`, `descripcion_corta`, `descripcion`, `dificultad`, and all
+  `tags` using a case-insensitive substring search (`mb_strpos`).
+  Alias: `destino` (legacy; both map to the same filter).
+</ParamField>
+
+<ParamField query="categoria" type="string">
+  Filter by category name (e.g., `Aventura`, `Playa`, `Cultural`). The special
+  value `todos` disables the filter. Comparison is case-insensitive.
+</ParamField>
+
+<ParamField query="precio_min" type="number">
+  Minimum `precio_base` (decimal, inclusive). Packages with a base price below
+  this value are excluded.
+</ParamField>
+
+<ParamField query="precio_max" type="number">
+  Maximum `precio_base` (decimal, inclusive). Packages with a base price above
+  this value are excluded.
+</ParamField>
+
+<ParamField query="duracion" type="string[]">
+  One or more duration range buckets. Accepted values:
+
+  | Value  | Duration in days     |
+  | ------ | -------------------- |
+  | `1-3`  | 1 to 3 days          |
+  | `4-7`  | 4 to 7 days          |
+  | `8-14` | 8 to 14 days         |
+  | `15+`  | 15 or more days      |
+
+  Pass multiple values as repeated query params: `duracion[]=1-3&duracion[]=4-7`.
+</ParamField>
+
+<ParamField query="dificultad" type="string">
+  Filter by difficulty level (e.g., `Fácil`, `Moderado`, `Difícil`). Values are
+  sourced dynamically from the packages in the catalog.
+</ParamField>
+
+<ParamField query="tag" type="string">
+  Filter packages that include a specific tag (single value, case-insensitive
+  exact match).
+</ParamField>
+
+<ParamField query="orden" type="string">
+  Sort order for the result set. Accepted values:
+
+  | Value         | Effect                        |
+  | ------------- | ----------------------------- |
+  | `precio_asc`  | Cheapest packages first       |
+  | `precio_desc` | Most expensive packages first |
+  | *(omitted)*   | Default: `destacado DESC, id_paquete DESC` |
+</ParamField>
+
+### Response
+
+Returns `Content-Type: text/html`. The rendered view passes each package object with the following fields derived from the `Paquete::all()` query:
+
+| Field               | Type      | Source                                              |
+| ------------------- | --------- | --------------------------------------------------- |
+| `id_paquete`        | `int`     | `paquetes.id_paquete`                               |
+| `nombre`            | `string`  | `paquetes.nombre`                                   |
+| `slug`              | `string`  | `paquetes.slug`                                     |
+| `precio_base`       | `decimal` | `paquetes.precio_base`                              |
+| `precio_anterior`   | `decimal` | `paquetes.precio_anterior` (nullable)               |
+| `duracion_dias`     | `int`     | `paquetes.duracion_dias`                            |
+| `duracion_noches`   | `int`     | `paquetes.duracion_noches`                          |
+| `descripcion_corta` | `string`  | `paquetes.descripcion_corta`                        |
+| `imagen_url`        | `string`  | Primary image from `paquete_imagenes` (optimized)   |
+| `ciudad_nombre`     | `string`  | `ciudades.nombre` (JOIN)                            |
+| `categoria_nombre`  | `string`  | `categorias_paquete.nombre` (JOIN)                  |
+| `tags`              | `array`   | From `paquete_tags` via `GROUP_CONCAT` subquery      |
+| `reservas_count`    | `int`     | `SUM(detalle_reservas.cantidad_pasajeros)` subquery  |
+| `destacado`         | `int`     | `paquetes.destacado` (1 = featured)                 |
+| `disponible`        | `int`     | `paquetes.disponible` (always 1 in filtered list)   |
+
+<Tip>
+  Use `GET /api/paquetes/buscar` instead of this endpoint when you need
+  machine-readable data. The HTML catalog endpoint is for browser rendering
+  only.
+</Tip>
+
+---
+
+## `GET /paquete/{slug}`
+
+Returns an HTML detail page for a single tour package identified by its URL-friendly slug. If the package does not exist or has `disponible = 0`, the server responds with HTTP 404.
+
+### Request
+
+```http
+GET /paquete/cusco-valle-sagrado-machu-picchu HTTP/1.1
+Host: yourdomain.com
+```
+
+### Path Parameters
+
+<ParamField path="slug" type="string" required>
+  The URL-friendly identifier of the package. Slugs are unique and stored in
+  `paquetes.slug`. Examples from the catalog:
+
+  - `cusco-valle-sagrado-machu-picchu`
+  - `cancun-all-inclusive`
+  - `japon-esencial`
+  - `machu-picchu-full-day`
+  - `huaraz-laguna-69`
+
+  The handler also accepts a numeric `id_paquete` in place of the slug
+  (`/paquete/42`). Use slugs in production — they are stable and
+  human-readable.
+</ParamField>
+
+### Response
+
+Returns `Content-Type: text/html`. The view receives the full package detail object, which includes all fields from `GET /catalog` plus the following additional data loaded by `Paquete::getDetailBySlug()` / `attachDetailData()`:
+
+| Field         | Type     | Source                                                          |
+| ------------- | -------- | --------------------------------------------------------------- |
+| `imagenes`    | `array`  | Full gallery from `paquete_imagenes` ordered by `orden ASC`     |
+| `itinerario`  | `array`  | Day-by-day objects from `paquete_itinerario` (`dia`, `titulo`, `descripcion`). Falls back to legacy JSON column. |
+| `incluye`     | `array`  | String list from `paquete_incluye` ordered by `orden`           |
+| `no_incluye`  | `array`  | String list from `paquete_no_incluye` ordered by `orden`        |
+| `documentos`  | `array`  | String list from `paquete_documentos` ordered by `orden`        |
+| `tags`        | `array`  | String list from `paquete_tags` ordered by `orden`              |
+| `politicas`   | `array`  | Objects `{titulo, descripcion}` from `paquete_politicas`        |
+| `relacionados`| `array`  | Up to 4 related packages sharing same city or category          |
+
+### Error Responses
+
+| HTTP Status | Condition                                               |
+| ----------- | ------------------------------------------------------- |
+| `404`       | Slug not found, or package has `disponible = 0`         |
+| `500`       | Database or server error during detail load             |
+
+---
+
+## `GET /api/paquetes/buscar`
+
+The only true JSON API endpoint in the catalog layer. Accepts a search term and returns up to 30 matching available packages as a JSON array. Used by the site's real-time search bar but can be called by any HTTP client.
+
+### Request
+
+```http
+GET /api/paquetes/buscar?q=cusco HTTP/1.1
+Host: yourdomain.com
+Accept: application/json
+```
+
+### Query Parameters
+
+<ParamField query="q" type="string" required>
+  Search term (minimum 1 non-whitespace character). The query is wrapped in SQL
+  `LIKE '%q%'` and matched against 8 columns simultaneously:
+
+  - `paquetes.nombre`
+  - `paquetes.descripcion`
+  - `paquetes.descripcion_corta`
+  - `categorias_paquete.nombre`
+  - `ciudades.nombre`
+  - `paquetes.dificultad`
+  - `paquetes.comidas`
+  - `paquetes.hotel`
+
+  If `q` is empty or whitespace, the endpoint returns an empty array `[]`
+  immediately without hitting the database.
+</ParamField>
+
+### Response
+
+`Content-Type: application/json; charset=UTF-8`
+
+Returns a JSON array of package objects. Maximum 30 results, ordered by `id_paquete DESC`.
+
+#### Response Shape
+
+<ResponseField name="[*]" type="object">
+  Each element in the array represents one matching package.
+
+  <ResponseField name="id" type="integer">
+    Unique package identifier (`paquetes.id_paquete`).
+  </ResponseField>
+
+  <ResponseField name="nombre" type="string">
+    Full package name.
+  </ResponseField>
+
+  <ResponseField name="slug" type="string">
+    URL-friendly identifier. Use this to construct the detail URL:
+    `/paquete/{slug}`.
+  </ResponseField>
+
+  <ResponseField name="precio_base" type="number">
+    Base price per person (decimal, currency: Soles — S/).
+  </ResponseField>
+
+  <ResponseField name="precio_anterior" type="number | null">
+    Original price before discount, or `null` if no promotional price is set.
+  </ResponseField>
+
+  <ResponseField name="duracion_dias" type="integer">
+    Trip duration in days.
+  </ResponseField>
+
+  <ResponseField name="duracion_noches" type="integer">
+    Trip duration in nights.
+  </ResponseField>
+
+  <ResponseField name="descripcion_corta" type="string">
+    Short marketing description (up to 255 characters).
+  </ResponseField>
+
+  <ResponseField name="imagen_principal" type="string">
+    CDN-optimized URL of the primary package image. Falls back to a
+    slug-keyed Unsplash fallback if no image is uploaded.
+  </ResponseField>
+
+  <ResponseField name="imagen_fallback" type="string">
+    Fallback image URL (always present even when a primary image exists).
+  </ResponseField>
+
+  <ResponseField name="categoria_nombre" type="string">
+    Category name (e.g., `Aventura`, `Playa`, `Cultural`).
+  </ResponseField>
+
+  <ResponseField name="ciudad_nombre" type="string">
+    Destination city name (e.g., `Cusco`, `Cancún`, `Tokio`).
+  </ResponseField>
+
+  <ResponseField name="dificultad" type="string">
+    Difficulty level string (e.g., `Fácil`, `Moderado`, `Difícil`). Empty
+    string if not set.
+  </ResponseField>
+
+  <ResponseField name="vuelos" type="string">
+    Flight information text. Empty string if not applicable.
+  </ResponseField>
+
+  <ResponseField name="comidas" type="string">
+    Meals inclusion description. Empty string if not applicable.
+  </ResponseField>
+
+  <ResponseField name="hotel" type="string">
+    Hotel/accommodation description. Empty string if not applicable.
+  </ResponseField>
+
+  <ResponseField name="tags" type="string[]">
+    Array of tag strings parsed from `paquete_tags` (e.g.,
+    `["Machu Picchu", "Valle Sagrado", "Cultura"]`).
+  </ResponseField>
+
+  <ResponseField name="vuelo_incluido" type="boolean">
+    `true` when the `vuelos` field contains content **and** does not contain
+    the phrase `"no incluido"` or `"no incluidos"`.
+  </ResponseField>
+
+  <ResponseField name="todo_incluido" type="boolean">
+    `true` when the combined `comidas + hotel` text contains `"todo incluido"`
+    or `"all inclusive"` (case-insensitive).
+  </ResponseField>
+
+  <ResponseField name="familiar" type="boolean">
+    `true` when any tag, the package name, or the short description contains
+    `"familiar"` or `"familia"` (case-insensitive).
+  </ResponseField>
+</ResponseField>
+
+### Example Response
+
+```json
+[
+  {
+    "id": 1,
+    "nombre": "Cusco, Valle Sagrado & Machu Picchu",
+    "slug": "cusco-valle-sagrado-machu-picchu",
+    "precio_base": 1290.00,
+    "precio_anterior": 1490.00,
+    "duracion_dias": 6,
+    "duracion_noches": 5,
+    "descripcion_corta": "Vive la magia del Imperio Inca en un circuito completo.",
+    "imagen_principal": "https://images.unsplash.com/photo-1526392060635-9d6019884377?auto=format&fit=crop&w=800&q=75",
+    "imagen_fallback": "https://images.unsplash.com/photo-1526392060635-9d6019884377?auto=format&fit=crop&w=800&q=75",
+    "categoria_nombre": "Cultural",
+    "ciudad_nombre": "Cusco",
+    "dificultad": "Moderado",
+    "vuelos": "No incluidos",
+    "comidas": "Desayunos incluidos",
+    "hotel": "Hoteles 3 estrellas",
+    "tags": ["Machu Picchu", "Valle Sagrado", "Cultura", "Historia"],
+    "vuelo_incluido": false,
+    "todo_incluido": false,
+    "familiar": false
+  }
+]
+```
+
+### Empty Query Response
+
+When `q` is empty or contains only whitespace, the endpoint returns immediately with an empty array and HTTP 200:
+
+```json
+[]
+```
+
+### Error Response
+
+```json
+{
+  "error": "Error al buscar paquetes."
+}
+```
+
+HTTP status `500` is returned on database errors.

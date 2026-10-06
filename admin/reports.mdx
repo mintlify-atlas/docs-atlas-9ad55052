@@ -1,0 +1,185 @@
+---
+title: "Sales Reports and Revenue Analytics in Admin"
+sidebarTitle: "Reports"
+description: "Viajes AJT sales analytics: total revenue, monthly trends, top packages, payment method breakdown, and CSV export from the admin ventas panel."
+---
+
+The Sales & Reports module, powered by `AdminController::ventas()` and the `Reporte` model, gives administrators a real-time financial overview of the agency. All metrics are computed directly from the `pagos` and `reservas` tables — no caching layer — so every page load reflects the current state of the database.
+
+The sales panel is available at `GET /admin/ventas`. It can be filtered by payment method using the `?metodo=` query parameter, and the full transaction history can be downloaded as a CSV file.
+
+## Dashboard KPIs
+
+The main dashboard at `/admin/dashboard` surfaces four top-level KPIs from `Reporte::getDashboardKPIs()`:
+
+<CardGroup cols={2}>
+  <Card title="Total Revenue" icon="circle-dollar-to-slot">
+    **`ingresos_total`** — Sum of all `pagos.monto` where `estado = 'validado'`. Displayed with the configurable currency symbol from the `moneda_simbolo` key in the `configuracion` table (default: `S/`).
+  </Card>
+  <Card title="Total Reservations" icon="calendar-check">
+    **`reservas_count`** — Full count of rows in the `reservas` table, all statuses included.
+  </Card>
+  <Card title="Visa Requests" icon="passport">
+    **`visas_count`** — Total rows in `solicitudes_visa` across all visa service request states.
+  </Card>
+  <Card title="Registered Clients" icon="users">
+    **`clientes_count`** — Count of `usuarios` rows where `id_rol = 1`.
+  </Card>
+</CardGroup>
+
+A fifth derived metric, **conversion rate**, is computed as:
+
+```php
+$conversionRate = $clientesCount > 0
+    ? round(($reservasCount / $clientesCount) * 100, 1)
+    : 0.0;
+```
+
+## Sales Page Metrics
+
+`GET /admin/ventas` calls `Reporte::getVentasData()` (optionally filtered by `$filtroMetodo`) and exposes the following metrics:
+
+| Key | Description |
+|---|---|
+| `total_vendido` | `SUM(monto)` of all validated payments (`COALESCE` to 0 if none) |
+| `pagos_confirmados` | Count of payments with `estado = 'validado'` |
+| `pagos_pendientes` | Count of payments with `estado = 'pendiente'` |
+| `ticket_promedio` | `total_vendido / pagos_confirmados` (0.0 if no confirmed payments) |
+| `ventas_mes` | Sum of validated payments in the current calendar month |
+| `transacciones` | Full transaction list (joined with user, package, and payment method data) |
+| `top_paquetes` | Top 4 packages by total revenue |
+| `max_total` | Revenue of the highest-grossing package (used to scale bar chart widths) |
+
+## Filter by Payment Method
+
+<Tabs>
+  <Tab title="All Methods">
+    Navigate to `/admin/ventas` without any query parameter. `Reporte::getVentasData(null)` is called and the transaction table shows all payment methods.
+  </Tab>
+  <Tab title="Card (Tarjeta)">
+    Navigate to `/admin/ventas?metodo=card`. The `filtroMetodo` value is passed to `Reporte::getVentasData('card')`, which filters the transaction list by `mp.nombre = 'card'` in the join with `metodos_pago`.
+  </Tab>
+  <Tab title="Bank Transfer (Transferencia)">
+    Navigate to `/admin/ventas?metodo=trans`. Filters transactions to `mp.nombre = 'trans'`.
+  </Tab>
+  <Tab title="Yape / Plin">
+    Navigate to `/admin/ventas?metodo=yape`. Filters transactions to `mp.nombre = 'yape'`.
+  </Tab>
+</Tabs>
+
+The controller reads the filter from `$_GET['metodo']` and passes it through only if non-empty:
+
+```php
+$filtroMetodo = isset($_GET['metodo']) ? trim($_GET['metodo']) : '';
+$data = Reporte::getVentasData($filtroMetodo !== '' ? $filtroMetodo : null);
+```
+
+Active payment methods are also queried from the `metodos_pago` table (`WHERE activo = 1`) to populate the filter UI dynamically.
+
+## Monthly Income Chart
+
+`Reporte::getMonthlyIncome()` returns a 12-element array of floats indexed 0 (January) through 11 (December), representing validated payment totals per month:
+
+```php
+// Returns array of 12 floats: [jan, feb, mar, ..., dec]
+$ingresosMes = Reporte::getMonthlyIncome();
+
+// Month labels for chart axis
+$mesesLabels = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+```
+
+An optional `$year` parameter can be passed to filter by a specific year. When `null`, all years are summed together.
+
+The underlying query aggregates validated payments by month:
+
+```sql
+SELECT MONTH(created_at) AS mes, SUM(monto) AS total
+FROM pagos
+WHERE estado = 'validado'
+GROUP BY MONTH(created_at)
+```
+
+## Destination Distribution Chart
+
+`Reporte::getDestinosDistribucion(4)` returns the top 4 tour packages by reservation count, with each entry containing:
+
+| Key | Type | Description |
+|---|---|---|
+| `nombre` | `string` | Package name (truncated at first comma) |
+| `pct` | `int` | Percentage share of total reservations |
+| `color` | `string` | Hex color for chart segment |
+| `qty` | `int` | Raw reservation count |
+
+Default colors assigned to the top 4 destinations:
+
+```php
+$colores = ['#1b2c8a', '#3a51d1', '#ffd60a', '#94a3b8'];
+```
+
+## Recent Bookings Widget
+
+`Reporte::getRecentBookings(5)` returns the 5 most recent reservations for the dashboard widget. Each row includes the reservation header, client name and email, the package name (from a correlated subquery on `detalle_reservas`), and the sum of `precio_unitario × cantidad_pasajeros`.
+
+## Top Packages by Revenue
+
+The `top_paquetes` array in `getVentasData()` lists up to 4 packages ranked by total revenue:
+
+```sql
+SELECT p.nombre, SUM(dr.precio_unitario * dr.cantidad_pasajeros) AS total
+FROM detalle_reservas dr
+INNER JOIN paquetes p ON dr.id_paquete = p.id_paquete
+GROUP BY dr.id_paquete
+ORDER BY total DESC
+LIMIT 4
+```
+
+`max_total` equals `top_paquetes[0]['total']` and is used to calculate percentage widths for horizontal bar chart segments. It defaults to `1.0` if the array is empty.
+
+## Sales CSV Export
+
+`GET /admin/ventas/exportar` streams a UTF-8 BOM CSV file directly to the browser. The query joins `pagos`, `usuarios`, `reservas`, `detalle_reservas`, `paquetes`, and `metodos_pago` for a complete financial picture:
+
+```sql
+SELECT pa.created_at AS fecha_pago,
+       r.codigo_reserva,
+       CONCAT(u.nombres, ' ', u.apellidos) AS cliente_nombre,
+       p.nombre AS paquete_nombre,
+       pa.monto,
+       mp.nombre AS metodo_pago,
+       pa.estado
+FROM pagos pa
+INNER JOIN usuarios u ON pa.id_usuario = u.id_usuario
+INNER JOIN reservas r ON pa.id_reserva = r.id_reserva
+INNER JOIN detalle_reservas dr ON r.id_reserva = dr.id_reserva
+INNER JOIN paquetes p ON dr.id_paquete = p.id_paquete
+LEFT JOIN metodos_pago mp ON pa.id_metodo_pago = mp.id_metodo
+ORDER BY pa.id_pago DESC
+```
+
+### CSV Columns
+
+| Column | Source | Notes |
+|---|---|---|
+| Fecha | `pagos.created_at` | ISO datetime |
+| Código Reserva | `reservas.codigo_reserva` | Format: `AJT-XXXXXX` |
+| Cliente | `CONCAT(nombres, apellidos)` | Full name |
+| Paquete | `paquetes.nombre` | Package display name |
+| Monto (S/) | `pagos.monto` | Formatted to 2 decimal places |
+| Método de Pago | `metodos_pago.nombre` | `'Sin registrar'` if no join match |
+| Estado | Mapped label | `Validado`, `Rechazado`, or `Pendiente` |
+
+The exported file is named `ventas_viajes_ajt_YYYY-MM-DD.csv` using the current server date.
+
+<Note>
+  The CSV uses a UTF-8 BOM (`\xEF\xBB\xBF`) at the start of the file to ensure accented characters in package names and client names display correctly when opened in Microsoft Excel on Windows.
+</Note>
+
+## Currency Configuration
+
+The currency symbol displayed throughout the admin panel is read from the `configuracion` table via:
+
+```php
+Config::getString('moneda_simbolo', 'S/')
+```
+
+The default value is `S/` (Peruvian sol). To change it, update the `moneda_simbolo` key from the Settings page at `/admin/ajustes`.

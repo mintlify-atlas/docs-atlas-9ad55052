@@ -1,0 +1,182 @@
+---
+title: "Manage Tour Packages: Create, Edit, and Publish"
+sidebarTitle: "Packages"
+description: "Full guide to creating, editing, publishing, and deleting tour packages in the Viajes AJT admin panel, including gallery management and itinerary editing."
+---
+
+The Packages module, managed by `PaqueteController`, is the core catalog management tool for Viajes AJT. Administrators can create detailed tour packages with rich descriptions, day-by-day itineraries, multi-image galleries, inclusion lists, policies, and tags — all persisted inside a DB transaction to guarantee data consistency.
+
+## Route Reference
+
+| Method | Route | Action |
+|---|---|---|
+| `GET` | `/admin/paquetes` | List all packages with availability toggle |
+| `GET` | `/admin/paquetes/create` | Display creation form |
+| `POST` | `/admin/paquetes/store` | Persist new package |
+| `GET` | `/admin/paquetes/edit/{id}` | Display edit form for package `{id}` |
+| `POST` | `/admin/paquetes/update/{id}` | Persist changes to package `{id}` |
+| `POST` | `/admin/paquetes/delete/{id}` | Deactivate (soft-delete) package `{id}` |
+| `POST` | `/admin/paquetes/toggle-disponible/{id}` | Toggle `disponible` flag on/off |
+
+<Note>
+  All routes in `PaqueteController` are protected by the same `id_rol = 2` session check used in `AdminController`. Unauthorized requests are redirected to `/login`.
+</Note>
+
+## Package Fields
+
+Every package maps to the `paquetes` table and is defined by the following fields (sourced directly from `Paquete::PACKAGE_COLUMNS`):
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id_categoria` | `SMALLINT` | ✅ | Foreign key to `categorias_paquete` |
+| `id_ciudad` | `INT` | ✅ | Foreign key to `ciudades` |
+| `nombre` | `VARCHAR(160)` | ✅ | Public display name |
+| `slug` | `VARCHAR(180)` | ✅ | URL-friendly identifier — must be unique |
+| `descripcion_corta` | `VARCHAR(255)` | | One-line teaser shown in catalog cards |
+| `descripcion` | `TEXT` | | Full HTML/Markdown description |
+| `itinerario` | `TEXT` | | Legacy JSON column; new data stored in `paquete_itinerario` |
+| `precio_base` | `DECIMAL(10,2)` | ✅ | Base price per passenger |
+| `precio_anterior` | `DECIMAL(10,2)` | | Crossed-out "before" price (optional) |
+| `duracion_dias` | `TINYINT` | ✅ | Trip length in days |
+| `duracion_noches` | `TINYINT` | ✅ | Trip length in nights |
+| `cupo_maximo` | `SMALLINT` | | Maximum passenger capacity |
+| `dificultad` | `VARCHAR(40)` | | Difficulty label (e.g. "Fácil", "Moderado") |
+| `hotel` | `VARCHAR(160)` | | Hotel name or rating |
+| `habitacion` | `VARCHAR(120)` | | Room type description |
+| `comidas` | `VARCHAR(160)` | | Meal plan description |
+| `vuelos` | `VARCHAR(160)` | | Flight details |
+| `movilidad` | `VARCHAR(160)` | | Ground transport details |
+| `guia` | `VARCHAR(160)` | | Guide service description |
+| `destacado` | `TINYINT(1)` | | `1` = featured in catalog hero positions |
+| `disponible` | `TINYINT(1)` | | `1` = visible to customers; `0` = hidden |
+
+### Slug Uniqueness
+
+The slug is the public URL key for a package (e.g. `/paquetes/cusco-valle-sagrado-machu-picchu`). Before saving, the controller calls `Paquete::slugExists($slug)` on create, or `Paquete::slugExists($slug, $id)` on update (to exclude the current package from the check).
+
+```php
+// Checking for slug collision during create
+if (Paquete::slugExists($slug)) {
+    $_SESSION['error'] = "El slug (URL amigable) ya se encuentra registrado. Por favor, asigne uno diferente.";
+    // redirect back to form
+}
+```
+
+## Related Lists
+
+When a package is saved, `Paquete::syncPackageLists()` runs inside the same DB transaction and replaces all related rows:
+
+| List Key | Table | Description |
+|---|---|---|
+| `incluye_items` | `paquete_incluye` | What is included (text lines) |
+| `no_incluye_items` | `paquete_no_incluye` | What is excluded |
+| `documentos_items` | `paquete_documentos` | Required travel documents |
+| `tags_items` | `paquete_tags` | Searchable tags |
+| `politicas_items` | `paquete_politicas` | Policies — `titulo` + `descripcion` pairs |
+
+Each list uses a full `DELETE + INSERT` cycle (ordered by `orden` column) on every save.
+
+## Itinerary
+
+The itinerary is stored in the normalized `paquete_itinerario` table with columns `dia`, `titulo`, `descripcion`, and `orden`. The legacy JSON `itinerario` column in `paquetes` is kept as a fallback:
+
+```php
+// Paquete::getItinerario() — primary source
+$stmt = $db->prepare("SELECT dia, titulo, descripcion
+                       FROM paquete_itinerario
+                       WHERE id_paquete = :id_paquete
+                       ORDER BY orden ASC, id ASC");
+
+// Fallback: legacy JSON column
+$stmtJson = $db->prepare("SELECT itinerario FROM paquetes WHERE id_paquete = :id_paquete LIMIT 1");
+```
+
+<Tip>
+  Always prefer the `paquete_itinerario` table for new data. The JSON column exists only for backwards compatibility with packages migrated from an earlier version.
+</Tip>
+
+## Gallery Management
+
+Images are stored in the `paquete_imagenes` table (`id_imagen`, `id_paquete`, `url_imagen`, `es_principal`, `orden`). `Paquete::saveGallery()` handles the full lifecycle:
+
+1. **Delete** any images whose IDs appear in `delete_ids[]`
+2. **Update** existing images (URL, order, principal flag)
+3. **Insert** new images from `new_url[]`
+4. **Deduplicate** using `ImageUrlService::imageKey()` — identical URLs are merged, not duplicated
+5. **Enforce exactly one principal** — after all mutations, the gallery always has `es_principal = 1` on exactly one row
+
+`Paquete::getPrincipalImage($id)` returns the `url_imagen` of the row where `es_principal = 1`.
+
+### Image Optimization
+
+Images are processed through `ImageUrlService` before storage:
+
+| Context | Method | Target Width |
+|---|---|---|
+| Catalog listing | `ImageUrlService::catalogOptimize()` | 800 px |
+| Package detail page | `ImageUrlService::optimize()` | 1200 px, quality 80 |
+
+## Availability Toggle
+
+The toggle button on the packages list POSTs to `/admin/paquetes/toggle-disponible/{id}`. The controller reads the current `disponible` value from `Paquete::findById()` and flips it:
+
+```php
+$nuevoEstado = $paquete['disponible'] ? 0 : 1;
+Paquete::setDisponible($id, $nuevoEstado);
+```
+
+Setting `disponible = 0` immediately hides the package from the public catalog without deleting any data.
+
+## Deleting a Package
+
+`POST /admin/paquetes/delete/{id}` does **not** perform a hard delete. It first checks `Paquete::hasReservas($id)`, which counts rows in `detalle_reservas`:
+
+```php
+// Paquete::hasReservas()
+$stmt = $db->prepare('SELECT COUNT(*) FROM detalle_reservas WHERE id_paquete = :id');
+```
+
+In both cases (with or without reservations), the package is **deactivated** (`disponible = 0`) to preserve the booking history. If a true hard delete is ever needed, it can be done directly via `Paquete::delete($id)`, though this will fail if foreign key constraints are still active.
+
+<Warning>
+  Attempting a hard delete on a package that has associated `detalle_reservas` rows will throw a `PDOException` due to the `ON DELETE RESTRICT` foreign key constraint defined in `schema.sql`.
+</Warning>
+
+## Package Creation Workflow
+
+<Steps>
+  <Step title="Open the Create Form">
+    Navigate to `GET /admin/paquetes/create`. The controller loads available categories from `Paquete::getCategorias()` and cities from `Paquete::getCiudades()` to populate the dropdowns.
+  </Step>
+  <Step title="Fill in Required Fields">
+    The following fields are mandatory and validated server-side before any DB write: `nombre`, `slug`, `id_categoria`, `id_ciudad`, `duracion_dias`, and `precio_base`. All must be non-empty and greater than zero.
+  </Step>
+  <Step title="Set a Unique Slug">
+    Enter a URL-friendly slug (e.g. `cusco-valle-sagrado-machu-picchu`). The controller calls `Paquete::slugExists($slug)` and rejects the form if a collision is found.
+  </Step>
+  <Step title="Add an Image URL">
+    Paste a direct image URL (Unsplash, Pexels, or Pixabay recommended). The controller runs `ImageUrlService::optimize()` then `ImageUrlService::isValid()` to confirm the URL is reachable and returns an image content type.
+  </Step>
+  <Step title="Add Lists and Policies">
+    Fill in `incluye_items`, `no_incluye_items`, `documentos_items`, `tags_items`, and `politicas_items` (title + description pairs). These are submitted as newline-separated text or arrays.
+  </Step>
+  <Step title="Submit the Form">
+    POST to `/admin/paquetes/store`. `Paquete::create($data, $url_imagen)` opens a DB transaction, inserts the `paquetes` row, saves the principal image to `paquete_imagenes`, syncs all related lists, and commits. On success, you are redirected to the packages list with a success flash message.
+  </Step>
+</Steps>
+
+## Editing a Package
+
+Navigation to `GET /admin/paquetes/edit/{id}` loads the package via `Paquete::findById($id)`, the current principal image via `Paquete::getPrincipalImage($id)`, and the full gallery via `Paquete::getGallery($id)`.
+
+On POST to `/admin/paquetes/update/{id}`, the controller runs `Paquete::update($id, $data, $url_imagen, false)` (image sync is skipped inside `update()` itself), then immediately calls `Paquete::saveGallery($id, $galleryData)` to handle all gallery mutations separately.
+
+```php
+if (Paquete::update($id, $data, $url_imagen, false)) {
+    $galleryData = $_POST;
+    $galleryData['url_imagen'] = $url_imagen;
+    Paquete::saveGallery($id, $galleryData);
+}
+```
+
+Both `Paquete::create()` and `Paquete::update()` wrap all database writes in a PDO transaction with automatic rollback on failure.

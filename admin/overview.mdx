@@ -1,0 +1,113 @@
+---
+title: "Admin Panel: Managing Viajes AJT Back-Office"
+sidebarTitle: "Overview"
+description: "Overview of the Viajes AJT admin panel — role-based access, navigation structure, dashboard KPIs, and links to all admin modules."
+---
+
+The Viajes AJT admin panel is the central back-office for managing tour packages, reservations, users, sales reports, and system settings. Every route under `/admin/` is protected by a role check executed in the `AdminController` constructor — unauthenticated visitors or users without administrator privileges are immediately redirected to `/auth/login`.
+
+## Access Control
+
+Access to any admin page requires an active PHP session where `$_SESSION['usuario']['id_rol']` equals `2` (Administrador). The check is enforced on every page load by the constructor:
+
+```php
+// AdminController::__construct()
+if (!isset($_SESSION['usuario']) || (int)$_SESSION['usuario']['id_rol'] !== 2) {
+    $_SESSION['error'] = "Acceso denegado. Se requieren privilegios de administrador.";
+    header('Location: ' . BASE_URL . '/auth/login');
+    exit();
+}
+```
+
+<Note>
+  Regular client accounts (`id_rol = 1`) cannot access any `/admin/` route. Attempting to do so stores an error message in the session and redirects to the login page.
+</Note>
+
+## Dashboard
+
+The admin dashboard at `GET /admin/dashboard` aggregates four core KPIs from `Reporte::getDashboardKPIs()`, a monthly income chart, a destination distribution chart, and a recent bookings list.
+
+### KPI Metrics
+
+<CardGroup cols={2}>
+  <Card title="Total Revenue" icon="circle-dollar-to-slot">
+    `ingresos_total` — Sum of all payments with `estado = 'validado'` from the `pagos` table. Displayed with the currency symbol configured in `moneda_simbolo` (default `S/`).
+  </Card>
+  <Card title="Total Reservations" icon="calendar-check">
+    `reservas_count` — Total row count from the `reservas` table, regardless of status.
+  </Card>
+  <Card title="Visa Requests" icon="passport">
+    `visas_count` — Total row count from `solicitudes_visa`, covering all visa service applications.
+  </Card>
+  <Card title="Registered Clients" icon="users">
+    `clientes_count` — Count of users with `id_rol = 1` in the `usuarios` table.
+  </Card>
+</CardGroup>
+
+The model also computes a **conversion rate** (`conversion_rate`) as `reservas_count / clientes_count × 100`, rounded to one decimal place.
+
+### Charts
+
+| Chart | Data Source | Description |
+|---|---|---|
+| Monthly Income | `Reporte::getMonthlyIncome()` | 12-element float array indexed 0–11 (Jan–Dec), summing validated payments per month |
+| Destination Distribution | `Reporte::getDestinosDistribucion()` | Top-4 destinations by reservation count; each element contains `nombre`, `pct`, `color`, and `qty` |
+
+Month labels used in the chart axis are:
+
+```php
+$mesesLabels = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+```
+
+### Recent Bookings Widget
+
+The dashboard loads the 5 most recent reservations via `Reporte::getRecentBookings(5)`. Each entry includes the reservation code, client name, package name, and total amount.
+
+## Sidebar Navigation
+
+The admin layout exposes the following top-level modules:
+
+| Module | Route | Description |
+|---|---|---|
+| Dashboard | `/admin/dashboard` | KPIs, charts, recent bookings |
+| Paquetes | `/admin/paquetes` | Tour package catalog CRUD |
+| Reservas | `/admin/reservas` | Reservation management and export |
+| Ventas | `/admin/ventas` | Sales analytics and CSV export |
+| Usuarios | `/admin/usuarios` | User list, roles, and admin registration |
+| Visas | `/admin/visas` | Visa service request management |
+| Ajustes | `/admin/ajustes` | System-wide payment and contact settings |
+
+## System Settings
+
+The **Ajustes** page at `GET /admin/ajustes` reads all key-value pairs from the `configuracion` database table via `Config::getAll()`. Saving the form posts to `POST /admin/ajustes/guardar` and persists values using `Config::saveMany()`, which uses `INSERT ... ON DUPLICATE KEY UPDATE` so missing rows are created automatically.
+
+Configurable fields include:
+
+- **Agency info**: `agencia_nombre`, `agencia_razon_social`, `agencia_ruc`, `agencia_direccion`, `agencia_horario`, `agencia_email`, `agencia_telefono`, `agencia_whatsapp`
+- **Social media**: `agencia_facebook`, `agencia_instagram`, `agencia_tiktok`, `agencia_youtube`
+- **Yape/Plin**: `yape_numero`, `yape_titular`, `plin_numero`, `plin_titular`
+- **Bank transfer**: `banco_nombre`, `banco_cuenta`, `banco_cci`
+- **Booking policy**: `dias_anticipacion_reserva` (integer, 1–365; defaults to 30)
+
+<Tip>
+  The `Config` helper caches all values in a static array on first access. After `Config::saveMany()` runs, the cache is invalidated (`self::$cache = null`) so the next request reads fresh values from the database.
+</Tip>
+
+Administrators can also change their own password from the Ajustes page. The form posts to `POST /admin/ajustes/cambiar-password`, verifies the current password against the bcrypt hash with `Usuario::verifyPassword()`, and saves the new hash via `Usuario::cambiarPassword()`.
+
+## Admin Sub-Modules
+
+<CardGroup cols={2}>
+  <Card title="Packages" icon="suitcase-rolling" href="/admin/packages">
+    Create, edit, publish, and delete tour packages. Manage gallery images, itineraries, inclusions, and pricing.
+  </Card>
+  <Card title="Reservations" icon="calendar-days" href="/admin/reservations">
+    View all customer reservations, update booking and payment statuses, and download reservation data as CSV.
+  </Card>
+  <Card title="Users" icon="user-gear" href="/admin/users">
+    Browse all registered accounts, promote clients to administrator, and register new admin credentials.
+  </Card>
+  <Card title="Reports" icon="chart-bar" href="/admin/reports">
+    Sales analytics: total revenue, monthly trends, top packages by revenue, and payment method breakdown.
+  </Card>
+</CardGroup>

@@ -1,0 +1,377 @@
+---
+title: "Viajes AJT Database Schema and Table Reference"
+sidebarTitle: "Database Schema"
+description: "Complete reference for the Viajes AJT MySQL database — all tables, columns, relationships, and foreign key constraints for the viajes_ajt_3fn schema."
+---
+
+Viajes AJT uses a single MySQL database named `viajes_ajt_3fn` with the `utf8mb4` character set and `utf8mb4_unicode_ci` collation throughout. The schema is structured in dependency order so that tables are created before any foreign key that references them. All tables use the `InnoDB` engine to support transactions and foreign key enforcement.
+
+## Setup Order
+
+```bash
+# 1. Create tables (structure only)
+mysql -u root -p < database/schema.sql
+
+# 2. Populate with demo data
+mysql -u root -p < database/seed.sql
+```
+
+<Warning>
+  Always run `schema.sql` before `seed.sql`. The seed file assumes all tables exist and inserts demo rows that reference the IDs created by the schema.
+</Warning>
+
+---
+
+## Group 1: Master Tables
+
+These four tables have no foreign key dependencies and must be created first.
+
+### `roles`
+
+Defines user permission levels. The application currently uses two roles: **1 = client**, **2 = admin**.
+
+```sql
+CREATE TABLE IF NOT EXISTS roles (
+    id_rol       TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    nombre_rol   VARCHAR(30) NOT NULL UNIQUE,
+    activo       TINYINT(1) NOT NULL DEFAULT 1
+) ENGINE=InnoDB;
+```
+
+### `paises`
+
+Reference table of countries used for user nationality and visa services.
+
+```sql
+CREATE TABLE IF NOT EXISTS paises (
+    id_pais    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    nombre     VARCHAR(80) NOT NULL,
+    continente VARCHAR(50) NOT NULL
+) ENGINE=InnoDB;
+```
+
+### `categorias_paquete`
+
+Travel package categories. The `slug` column is URL-safe and unique, used for catalog filtering.
+
+```sql
+CREATE TABLE IF NOT EXISTS categorias_paquete (
+    id_categoria SMALLINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    nombre       VARCHAR(80)  NOT NULL,
+    slug         VARCHAR(100) NOT NULL UNIQUE
+) ENGINE=InnoDB;
+```
+
+### `metodos_pago`
+
+Payment method catalogue (e.g. bank transfer, Yape, Plin). Can be toggled active/inactive without deleting.
+
+```sql
+CREATE TABLE IF NOT EXISTS metodos_pago (
+    id_metodo TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    nombre    VARCHAR(60) NOT NULL UNIQUE,
+    activo    TINYINT(1) NOT NULL DEFAULT 1
+) ENGINE=InnoDB;
+```
+
+---
+
+## Group 2: First-Level Tables
+
+These tables carry a single foreign key dependency on a master table.
+
+### `ciudades`
+
+Cities linked to a country. Used as the destination reference for travel packages.
+
+```sql
+CREATE TABLE IF NOT EXISTS ciudades (
+    id_ciudad   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_pais     INT UNSIGNED NOT NULL,
+    nombre      VARCHAR(80) NOT NULL,
+    codigo_iata CHAR(3) NULL,
+    FOREIGN KEY (id_pais) REFERENCES paises(id_pais)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
+
+### `servicios_visa`
+
+Visa advisory services offered per country. The `precio_asesoria` is the consultation fee, not a visa fee.
+
+```sql
+CREATE TABLE IF NOT EXISTS servicios_visa (
+    id_servicio     INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_pais         INT UNSIGNED NOT NULL,
+    tipo_visa       VARCHAR(80)   NOT NULL,
+    precio_asesoria DECIMAL(10,2) NOT NULL,
+    disponible      TINYINT(1) NOT NULL DEFAULT 1,
+    FOREIGN KEY (id_pais) REFERENCES paises(id_pais)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
+
+### `usuarios`
+
+Registered user accounts. Passwords are stored as bcrypt hashes — never plaintext.
+
+```sql
+CREATE TABLE IF NOT EXISTS usuarios (
+    id_usuario           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_rol               TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    id_pais_nacionalidad INT UNSIGNED NULL,
+    nombres              VARCHAR(80)  NOT NULL,
+    apellidos            VARCHAR(80)  NOT NULL,
+    email                VARCHAR(120) NOT NULL UNIQUE,
+    password_hash        VARCHAR(255) NOT NULL,
+    dni_pasaporte        VARCHAR(20)  NULL UNIQUE,
+    telefono             VARCHAR(20)  NULL,
+    created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_rol) REFERENCES roles(id_rol)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (id_pais_nacionalidad) REFERENCES paises(id_pais)
+        ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB;
+```
+
+**Key constraints:**
+- `email` — `UNIQUE`: one account per email address
+- `dni_pasaporte` — `UNIQUE` (nullable): prevents duplicate identity documents; clients who have not provided a document number leave this `NULL`
+
+---
+
+## Group 3: Package Catalog
+
+All catalog tables cascade deletes from `paquetes`, so removing a package also removes its images, inclusions, exclusions, documents, tags, policies, and itinerary entries automatically.
+
+### `paquetes`
+
+The central catalog table. Each package has a `slug` used as its public URL identifier.
+
+```sql
+CREATE TABLE IF NOT EXISTS paquetes (
+    id_paquete        INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_categoria      SMALLINT UNSIGNED NOT NULL,
+    id_ciudad         INT UNSIGNED NOT NULL,
+    nombre            VARCHAR(160) NOT NULL,
+    slug              VARCHAR(180) NOT NULL UNIQUE,
+    descripcion_corta VARCHAR(255) NULL,
+    descripcion       TEXT NULL,
+    itinerario        TEXT NULL
+        COMMENT 'Legacy JSON — datos ahora en paquete_itinerario',
+    precio_base       DECIMAL(10,2) NOT NULL,
+    precio_anterior   DECIMAL(10,2) NULL,
+    duracion_dias     TINYINT UNSIGNED NOT NULL,
+    duracion_noches   TINYINT UNSIGNED NOT NULL,
+    cupo_maximo       SMALLINT UNSIGNED NULL,
+    dificultad        VARCHAR(40) NULL,
+    hotel             VARCHAR(160) NULL,
+    habitacion        VARCHAR(120) NULL,
+    comidas           VARCHAR(160) NULL,
+    vuelos            VARCHAR(160) NULL,
+    movilidad         VARCHAR(160) NULL,
+    guia              VARCHAR(160) NULL,
+    destacado         TINYINT(1) NOT NULL DEFAULT 0,
+    disponible        TINYINT(1) NOT NULL DEFAULT 1,
+    FOREIGN KEY (id_categoria) REFERENCES categorias_paquete(id_categoria)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (id_ciudad) REFERENCES ciudades(id_ciudad)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
+
+<Note>
+  The `itinerario` column is a legacy `TEXT` field that originally stored a JSON blob. All new itinerary data lives in the normalized `paquete_itinerario` table. Both columns may coexist during migration.
+</Note>
+
+### Package Detail Tables
+
+All of these tables share the same `ON DELETE CASCADE` relationship to `paquetes`:
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `paquete_imagenes` | Package photos | `url_imagen`, `es_principal`, `orden` |
+| `paquete_incluye` | What is included in the package | `texto`, `orden` |
+| `paquete_no_incluye` | What is excluded | `texto`, `orden` |
+| `paquete_documentos` | Required travel documents | `texto`, `orden` |
+| `paquete_tags` | Searchable labels / keywords | `texto`, `orden` |
+| `paquete_politicas` | Cancellation and booking policies | `titulo`, `descripcion`, `orden` |
+| `paquete_itinerario` | Day-by-day itinerary (normalized) | `dia`, `titulo`, `descripcion`, `orden` |
+
+---
+
+## Group 4: Booking
+
+### `reservas`
+
+A booking header. `codigo_reserva` is generated in the format `AJT-XXXXXX` (e.g. `AJT-392874`).
+
+```sql
+CREATE TABLE IF NOT EXISTS reservas (
+    id_reserva        INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_usuario        INT UNSIGNED NOT NULL,
+    codigo_reserva    VARCHAR(20) NOT NULL UNIQUE,
+    telefono_pasajero VARCHAR(20) NULL,
+    descuento         DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    estado            ENUM('pendiente','pagado','cancelado') NOT NULL DEFAULT 'pendiente',
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
+
+### `detalle_reservas`
+
+Line items for a reservation — one row per package in the booking.
+
+```sql
+CREATE TABLE IF NOT EXISTS detalle_reservas (
+    id_detalle         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_reserva         INT UNSIGNED NOT NULL,
+    id_paquete         INT UNSIGNED NOT NULL,
+    fecha_viaje        DATE NOT NULL,
+    cantidad_pasajeros TINYINT UNSIGNED NOT NULL,
+    precio_unitario    DECIMAL(10,2) NOT NULL,
+    FOREIGN KEY (id_reserva) REFERENCES reservas(id_reserva)
+        ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (id_paquete) REFERENCES paquetes(id_paquete)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
+
+### `viajeros_reserva`
+
+Traveler information (name + document number) for each passenger in a booking detail line.
+
+```sql
+CREATE TABLE IF NOT EXISTS viajeros_reserva (
+    id_viajero    INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_detalle    INT UNSIGNED NOT NULL,
+    nombres       VARCHAR(80) NOT NULL,
+    apellidos     VARCHAR(80) NOT NULL,
+    num_documento VARCHAR(20) NOT NULL,
+    FOREIGN KEY (id_detalle) REFERENCES detalle_reservas(id_detalle)
+        ON UPDATE CASCADE ON DELETE CASCADE
+) ENGINE=InnoDB;
+```
+
+### `pagos`
+
+Payment records. A payment can be linked to a `reserva`, a `solicitud_visa`, or both (nullable foreign keys using `ON DELETE SET NULL`).
+
+```sql
+CREATE TABLE IF NOT EXISTS pagos (
+    id_pago           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_usuario        INT UNSIGNED NOT NULL,
+    id_metodo_pago    TINYINT UNSIGNED NOT NULL,
+    id_reserva        INT UNSIGNED NULL,
+    id_solicitud_visa INT UNSIGNED NULL,
+    numero_operacion  VARCHAR(80) NOT NULL,
+    monto             DECIMAL(10,2) NOT NULL,
+    comprobante_url   VARCHAR(500) NULL,
+    estado            ENUM('pendiente','validado','rechazado') NOT NULL DEFAULT 'pendiente',
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_usuario)        REFERENCES usuarios(id_usuario)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (id_metodo_pago)    REFERENCES metodos_pago(id_metodo)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (id_reserva)        REFERENCES reservas(id_reserva)
+        ON UPDATE CASCADE ON DELETE SET NULL,
+    FOREIGN KEY (id_solicitud_visa) REFERENCES solicitudes_visa(id_solicitud)
+        ON UPDATE CASCADE ON DELETE SET NULL
+) ENGINE=InnoDB;
+```
+
+---
+
+## Group 5: Utility Tables
+
+### `configuracion`
+
+A key-value store for runtime settings (payment details, business info, etc.). The primary key is the string `clave`, so lookups are always by key name.
+
+```sql
+CREATE TABLE IF NOT EXISTS configuracion (
+    clave       VARCHAR(100) NOT NULL,
+    valor       TEXT NOT NULL,
+    descripcion VARCHAR(255) DEFAULT NULL,
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (clave)
+) ENGINE=InnoDB;
+```
+
+### `rate_limits`
+
+Stores individual attempt records for rate limiting. Each row represents one failed or tracked request attempt. The `RateLimiter` class queries this table with a time window to count recent attempts. See [Rate Limiting](/reference/rate-limiting) for details.
+
+```sql
+CREATE TABLE IF NOT EXISTS rate_limits (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    identifier VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(45) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_identifier (identifier),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB;
+```
+
+**Performance note:** Both `identifier` and `created_at` are indexed because the core query filters on both columns simultaneously:
+
+```sql
+SELECT COUNT(*) FROM rate_limits
+WHERE identifier = :identifier
+AND created_at > DATE_SUB(NOW(), INTERVAL :minutes MINUTE)
+```
+
+### `solicitudes_visa`
+
+Visa advisory consultation requests submitted by authenticated users.
+
+```sql
+CREATE TABLE IF NOT EXISTS solicitudes_visa (
+    id_solicitud     INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    id_usuario       INT UNSIGNED NOT NULL,
+    id_servicio      INT UNSIGNED NOT NULL,
+    codigo_solicitud VARCHAR(20) NOT NULL UNIQUE,
+    fecha_viaje_aprox DATE NULL,
+    estado           ENUM('nueva','contactado','documentos_pendientes',
+                          'en_revision','en_tramite','aprobada',
+                          'rechazada','cancelada') NOT NULL DEFAULT 'nueva',
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_usuario)  REFERENCES usuarios(id_usuario)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (id_servicio) REFERENCES servicios_visa(id_servicio)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB;
+```
+
+### Additional Utility Tables
+
+| Table | Purpose |
+|---|---|
+| `mensajes_contacto` | Contact form submissions (name, email, subject, message, read flag) |
+| `testimonios` | Customer testimonials displayed on the homepage |
+| `reclamaciones` | Complaints and suggestions from authenticated users, with admin response workflow |
+
+---
+
+## Foreign Key Reference Map
+
+```
+paises ─────────────┬─► ciudades ──────────────► paquetes ──┬─► paquete_imagenes
+                    │                                        ├─► paquete_incluye
+                    ├─► servicios_visa                       ├─► paquete_no_incluye
+                    │                                        ├─► paquete_documentos
+                    └─► usuarios ──────────────► reservas   ├─► paquete_tags
+                              │                    │         ├─► paquete_politicas
+roles ──────────────►         │              detalle_reservas└─► paquete_itinerario
+                              │                    │
+categorias_paquete ──────►    │              viajeros_reserva
+                              │
+                    solicitudes_visa
+                              │
+metodos_pago ──────────────► pagos
+                              └─► reservas (nullable)
+                              └─► solicitudes_visa (nullable)
+```

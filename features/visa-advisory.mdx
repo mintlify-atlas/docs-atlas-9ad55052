@@ -1,0 +1,152 @@
+---
+title: "Visa Advisory Service: Request and Track Applications"
+sidebarTitle: "Visa Advisory"
+description: "Browse Viajes AJT's visa advisory catalog, submit an advisory request, and track your application through 8 status stages from submission to approval."
+---
+
+Viajes AJT offers a dedicated visa advisory service that helps travelers navigate visa requirements for destinations worldwide. The service is managed through `VisaController` and the `Visa` model, exposing a public catalog, a customer-facing request form, and a full admin management panel.
+
+## Routes
+
+| Method | URL | Handler | Auth | Description |
+|--------|-----|---------|------|-------------|
+| `GET` | `/visas` | `VisaController@index` | Public | Catalog of available visa services |
+| `POST` | `/visas/solicitar` | `VisaController@procesarSolicitud` | Required | Submit an advisory request |
+| `GET` | `/admin/visas` | `VisaController@adminIndex` | Admin | Admin inbox of all applications |
+| `POST` | `/admin/visas/update-estado` | `VisaController@adminUpdateEstado` | Admin | Update application status |
+
+## Public Visa Catalog (`/visas`)
+
+The visa catalog page lists all records from `servicios_visa` where `disponible = 1`, joined with the `paises` table to provide country name and continent.
+
+Each service record exposes:
+
+| Field | Description |
+|-------|-------------|
+| `tipo_visa` | Visa type label (e.g. "Turista", "Schengen") |
+| `precio_asesoria` | Advisory fee in the configured currency |
+| `pais_nombre` | Destination country name |
+| `pais_continente` | Continent (from `paises` table) |
+
+## Submitting a Request (`POST /visas/solicitar`)
+
+Customers select a visa service from the catalog and optionally provide an approximate travel date. The form submits to `POST /visas/solicitar`.
+
+**Required fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id_servicio` | `int` | ID of the selected `servicios_visa` record (must be `> 0`) |
+| `fecha_viaje_aprox` | `date` (optional) | Approximate travel date |
+
+<Note>
+  Submitting a visa request requires authentication. Unauthenticated users are redirected to `/login`, and the selected `id_servicio` and `fecha_viaje_aprox` are preserved in `$_SESSION['pending_visa']` for automatic resumption after login or registration.
+</Note>
+
+### Tracking Code
+
+`Visa::createSolicitud()` generates a unique tracking code for each application and inserts a record into `solicitudes_visa` with `estado = 'nueva'`:
+
+```php
+$codigo = 'VSA-' . str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+```
+
+Example: `VSA-384712`
+
+On success, the user is redirected to `/profile/mi-perfil#tramites` with a flash message containing their tracking code. On failure, they are redirected back to `/visas` with an error.
+
+## Application Status Lifecycle
+
+A visa application moves through **8 states**, all managed by the admin panel via `POST /admin/visas/update-estado`. The state is stored in `solicitudes_visa.estado` as a MySQL `ENUM`.
+
+<AccordionGroup>
+  <Accordion title="nueva — New Application">
+    The application has just been submitted by the customer. No staff member has reviewed it yet. This is the default state assigned by `Visa::createSolicitud()`.
+
+    **Next states:** `contactado`
+  </Accordion>
+
+  <Accordion title="contactado — Client Contacted">
+    A staff member has reached out to the customer (by phone, WhatsApp, or email) to discuss their visa needs and explain the process.
+
+    **Next states:** `documentos_pendientes`
+  </Accordion>
+
+  <Accordion title="documentos_pendientes — Documents Pending">
+    The customer has been informed of the required documentation and must submit their documents (passport copies, photos, bank statements, etc.) to proceed.
+
+    **Next states:** `en_revision`
+  </Accordion>
+
+  <Accordion title="en_revision — Under Review">
+    Staff are reviewing the documents submitted by the customer for completeness and compliance with the destination country's requirements.
+
+    **Next states:** `en_tramite`, `documentos_pendientes` (if documents are incomplete)
+  </Accordion>
+
+  <Accordion title="en_tramite — In Process">
+    The visa application has been formally submitted to the consulate or embassy. The customer is waiting for the official outcome.
+
+    **Next states:** `aprobada`, `rechazada`
+  </Accordion>
+
+  <Accordion title="aprobada — Approved">
+    The consulate or embassy has approved the visa. The customer will be notified and the stamped passport or visa document will be returned.
+
+    This is a **terminal success state**.
+  </Accordion>
+
+  <Accordion title="rechazada — Rejected">
+    The visa application was rejected by the consulate or embassy. Staff will contact the customer to explain the reasons and discuss next steps.
+
+    This is a **terminal failure state**.
+  </Accordion>
+
+  <Accordion title="cancelada — Cancelled">
+    The application was cancelled — either at the customer's request or due to the customer becoming unresponsive. No further action will be taken.
+
+    This is a **terminal cancelled state**.
+  </Accordion>
+</AccordionGroup>
+
+## Admin Status Update (`POST /admin/visas/update-estado`)
+
+Admins update the status of any application from the admin inbox. The endpoint validates both the application ID and the target state against the allowed list before writing to the database.
+
+```php
+$estadosValidos = [
+    'nueva', 'contactado', 'documentos_pendientes',
+    'en_revision', 'en_tramite',
+    'aprobada', 'rechazada', 'cancelada'
+];
+```
+
+**POST fields required:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id_solicitud` | `int` | ID of the `solicitudes_visa` record |
+| `estado` | `string` | One of the 8 valid state strings above |
+
+If either field is invalid, the admin is redirected back to `/admin/visas` with an error message. This route is protected — only users with `id_rol = 2` can access it.
+
+## Tracking Applications (Customer View)
+
+Customers can view all their visa applications, including current status and tracking code, in their profile dashboard at:
+
+```
+GET /profile/mi-perfil#tramites
+```
+
+The `ProfileController::miPerfil()` method calls `Visa::findByUsuario($id_usuario)`, which returns all `solicitudes_visa` rows for the current user joined with `servicios_visa` and `paises` — providing `tipo_visa`, `precio_asesoria`, and `pais_nombre` alongside the application `estado` and `codigo_solicitud`.
+
+## Database Schema Summary
+
+| Table | Key columns |
+|-------|-------------|
+| `servicios_visa` | `id_servicio`, `id_pais`, `tipo_visa`, `precio_asesoria`, `disponible` |
+| `solicitudes_visa` | `id_solicitud`, `id_usuario`, `id_servicio`, `codigo_solicitud`, `fecha_viaje_aprox`, `estado`, `created_at` |
+
+<Tip>
+  The `solicitudes_visa.estado` column is a MySQL `ENUM`, so only the 8 defined state strings can be stored. Any attempt to insert an invalid state will be rejected at the database level as a second line of defence.
+</Tip>

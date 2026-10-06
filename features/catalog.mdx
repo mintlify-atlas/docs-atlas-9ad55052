@@ -1,0 +1,173 @@
+---
+title: "Tour Package Catalog: Browse, Search, and Filter"
+sidebarTitle: "Tour Catalog"
+description: "Explore Viajes AJT's tour package catalog. Browse all packages at /catalog, view full details at /paquete/{slug}, and search live via the JSON API."
+---
+
+The Viajes AJT catalog is the public-facing heart of the platform, giving travelers a rich, filterable view of every available tour package. It is powered by `CatalogController` and the `Paquete` model, which load all package data in a single optimized query and apply all filtering in PHP — no N+1 queries.
+
+## Routes
+
+| Method | URL | Handler | Description |
+|--------|-----|---------|-------------|
+| `GET` | `/catalog` | `CatalogController@index` | Catalog listing with filters |
+| `GET` | `/catalogo` | `CatalogController@index` | Alias for `/catalog` |
+| `GET` | `/paquete/{slug}` | `CatalogController@detail` | Full package detail page |
+| `GET` | `/api/paquetes/buscar` | `CatalogController@searchJson` | Live JSON search API |
+
+## Catalog Listing (`/catalog`)
+
+When the catalog page loads, `CatalogController::index()` calls `Paquete::all()`, which executes a single SQL query joining `paquetes`, `ciudades`, and `categorias_paquete`. It also retrieves the main image and aggregates tags via a `GROUP_CONCAT` subquery — avoiding a separate query per package.
+
+Only packages where `disponible = 1` are shown to visitors. The full set is loaded once and all filtering is applied in PHP.
+
+### Available Filters
+
+The catalog supports the following URL query parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `q` / `destino` | `string` | Full-text search across name, city, category, description, difficulty, and tags |
+| `categoria` | `string` | Filter by category name (case-insensitive) |
+| `precio_min` | `float` | Minimum `precio_base` |
+| `precio_max` | `float` | Maximum `precio_base` |
+| `duracion[]` | `string[]` | Duration ranges: `1-3`, `4-7`, `8-14`, `15+` (days) |
+| `dificultad` | `string` | Difficulty level (case-insensitive match) |
+| `tag` | `string` | Filter by a single tag (case-insensitive) |
+| `orden` | `string` | Sort order: `precio_asc` or `precio_desc` |
+
+### Example Filter URL
+
+```
+/catalog?q=cusco&precio_max=2500&duracion[]=4-7&orden=precio_asc
+```
+
+## Package Data Model
+
+Each package returned by `Paquete::all()` or `Paquete::getDetailBySlug()` carries the following fields from the `paquetes` table:
+
+<CardGroup cols={2}>
+  <Card title="Core Info" icon="tag">
+    `nombre`, `slug`, `descripcion_corta`, `precio_base`, `precio_anterior`, `duracion_dias`, `duracion_noches`, `cupo_maximo`, `dificultad`
+  </Card>
+  <Card title="Logistics" icon="plane">
+    `hotel`, `habitacion`, `comidas`, `vuelos`, `movilidad`, `guia`
+  </Card>
+  <Card title="Visibility" icon="eye">
+    `destacado` (featured flag), `disponible` (public visibility flag)
+  </Card>
+  <Card title="Computed" icon="chart-bar">
+    `ciudad_nombre`, `categoria_nombre`, `reservas_count`, `imagen_url`, `tags[]`
+  </Card>
+</CardGroup>
+
+## Package Detail Page (`/paquete/{slug}`)
+
+The detail page is served by `CatalogController::detail()`. It resolves either by `slug` (default) or by numeric `id_paquete` when the segment is all digits.
+
+<Note>
+  If a package has `disponible = 0`, the detail route returns **404 — Package Not Found**, even if the slug is valid. This prevents discovery of unpublished packages.
+</Note>
+
+### Relations Loaded on Detail
+
+Beyond the core fields, the detail page loads all relational data for a package via `Paquete::attachRelations()`:
+
+| Relation key | Source table | Description |
+|---|---|---|
+| `incluye` | `paquete_incluye` | What's included in the package |
+| `no_incluye` | `paquete_no_incluye` | What's explicitly excluded |
+| `documentos` | `paquete_documentos` | Required travel documents |
+| `tags` | `paquete_tags` | Searchable tag labels |
+| `politicas` | `paquete_politicas` | Cancellation / policy blocks (title + description) |
+| `itinerario` | `paquete_itinerario` | Day-by-day itinerary (falls back to legacy JSON column) |
+
+### Related Packages
+
+The detail page displays up to **4 related packages** sourced via `Paquete::getRelatedPackages()`, which queries packages sharing the same city (`ciudades.nombre`) or category (`categorias_paquete.nombre`), excluding the current package. Featured packages appear first.
+
+```php
+$relacionados = Paquete::getRelatedPackages(
+    (int)$paquete['id_paquete'],
+    $paquete['ciudad_nombre'],
+    $paquete['categoria_nombre'],
+    4
+);
+```
+
+## Package Images
+
+Images for each package are stored in the `paquete_imagenes` table. The main image is the row where `es_principal = 1`. The gallery consists of all other rows ordered by `orden ASC`.
+
+**Fallback behavior:** When no database image exists for a package slug, the system falls back to a curated Unsplash image mapped in `Paquete::firstFallbackBySlug()`. For example:
+
+```php
+'cusco-valle-sagrado-machu-picchu' =>
+    'https://images.unsplash.com/photo-1526392060635-9d6019884377?auto=format&fit=crop&w=1200&q=80',
+```
+
+### Image Optimization via `ImageUrlService`
+
+All images are automatically resized via `ImageUrlService` before being sent to the frontend:
+
+| Context | Target width | Method |
+|---------|-------------|--------|
+| Catalog listing | 800 px | `ImageUrlService::catalogOptimize()` |
+| Package detail | 1200 px, quality 80 | `ImageUrlService::optimize()` |
+
+<Tip>
+  The Unsplash fallback URLs already include Unsplash's `fit=crop` and `q=80` parameters. `ImageUrlService` overrides the `w=` parameter to enforce the correct size for each context.
+</Tip>
+
+## JSON Search API (`GET /api/paquetes/buscar`)
+
+The search API is used for live (AJAX) filtering in the catalog frontend. It accepts a single query string parameter:
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `q` | Yes | Search term; if empty, returns `[]` |
+
+The query searches across: `nombre`, `descripcion`, `descripcion_corta`, `categoria_nombre`, `ciudad_nombre`, `dificultad`, `comidas`, `hotel` — limited to 30 results.
+
+### Response Shape
+
+```json
+[
+  {
+    "id": 1,
+    "nombre": "Cusco, Valle Sagrado y Machu Picchu",
+    "slug": "cusco-valle-sagrado-machu-picchu",
+    "precio_base": 1890.00,
+    "precio_anterior": 2100.00,
+    "duracion_dias": 6,
+    "duracion_noches": 5,
+    "descripcion_corta": "La ruta inca más completa del Perú.",
+    "imagen_principal": "https://images.unsplash.com/...",
+    "imagen_fallback": "https://images.unsplash.com/...",
+    "categoria_nombre": "Cultural",
+    "ciudad_nombre": "Cusco",
+    "dificultad": "Moderado",
+    "vuelos": "No incluidos",
+    "comidas": "Desayunos incluidos",
+    "hotel": "Hotel 3 estrellas",
+    "tags": ["inca", "historia", "trekking"],
+    "vuelo_incluido": false,
+    "todo_incluido": false,
+    "familiar": false
+  }
+]
+```
+
+### Smart Boolean Flags
+
+The API automatically computes three derived flags per result:
+
+| Flag | Logic |
+|------|-------|
+| `vuelo_incluido` | `true` if `vuelos` field is non-empty and does not contain "no incluido" |
+| `todo_incluido` | `true` if `comidas` or `hotel` contains "todo incluido" or "all inclusive" |
+| `familiar` | `true` if any tag, the name, or the short description contains "familiar" or "familia" |
+
+<Warning>
+  An empty `q` parameter causes the API to return an empty JSON array `[]` immediately, without hitting the database.
+</Warning>

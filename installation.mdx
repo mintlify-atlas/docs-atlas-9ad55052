@@ -1,0 +1,251 @@
+---
+title: "Install Viajes AJT on Apache and MySQL"
+sidebarTitle: "Installation"
+description: "Step-by-step guide to deploy Viajes AJT locally or on a production server using Apache, PHP 8, and MySQL."
+---
+
+Viajes AJT is a full-stack PHP travel agency platform built on a custom MVC architecture with a PSR-4 autoloader, a front-controller entry point, and a MySQL relational database. This guide walks you through every step needed to get the application running on an Apache + PHP 8 + MySQL stack — from cloning the repository to verifying your first page load.
+
+## Prerequisites
+
+Before you begin, make sure your environment meets the following requirements:
+
+<CardGroup cols={3}>
+  <Card title="PHP 8.0+" icon="php">
+    `declare(strict_types=1)` and named arguments are used throughout. PHP 7.x is **not** supported.
+  </Card>
+  <Card title="Apache + mod_rewrite" icon="server">
+    The front-controller pattern requires `mod_rewrite` and `AllowOverride All` on the document root.
+  </Card>
+  <Card title="MySQL 5.7+ / MariaDB 10.4+" icon="database">
+    The schema uses `InnoDB`, `utf8mb4`, foreign keys, and `ENUM` columns. Both MySQL 5.7+ and MariaDB 10.4+ are supported.
+  </Card>
+</CardGroup>
+
+---
+
+## Directory Structure
+
+Once cloned, the repository has the following top-level layout:
+
+```
+ajt_viajes/
+├── app/                   # MVC application code (never web-accessible)
+│   ├── Config/            # LocalConfig.php, Database.php, Router.php
+│   ├── Controllers/       # All controller classes (App\Controllers\*)
+│   ├── Helper/            # ErrorHandler, SecurityHeaders, Csrf, etc.
+│   ├── Models/            # PDO-backed model classes (App\Models\*)
+│   ├── Services/          # Business-logic services
+│   └── Views/             # PHP view templates
+├── database/
+│   ├── schema.sql         # DDL — run first
+│   └── seed.sql           # DML — run second
+└── public/                # ← Apache DocumentRoot
+    ├── .htaccess          # mod_rewrite front-controller rules
+    ├── index.php          # Single entry point for all requests
+    ├── assets/            # CSS, JS, images
+    └── uploads/           # User-uploaded files (comprobantes, QRs)
+```
+
+<Note>
+  The `app/` directory must **not** be inside `public/`. Apache should only serve files from `public/`. All PHP classes live in `app/` and are loaded by the PSR-4 autoloader registered in `public/index.php`.
+</Note>
+
+---
+
+## Installation Steps
+
+<Steps>
+
+### Clone the Repository
+
+```bash
+git clone https://github.com/brauliobe10/ajt_viajes.git
+cd ajt_viajes
+```
+
+Place the cloned directory wherever Apache can read it — for example, inside `/var/www/html/` on Linux or `C:\xampp\htdocs\` on Windows with XAMPP.
+
+### Configure the Apache Virtual Host
+
+Point Apache's `DocumentRoot` at the `public/` subdirectory and enable `AllowOverride All` so that the `.htaccess` front-controller rules take effect.
+
+<CodeGroup>
+```apacheconf Named Virtual Host (production / local domain)
+<VirtualHost *:80>
+    ServerName viajesajt.local
+    DocumentRoot /var/www/html/ajt_viajes/public
+
+    <Directory /var/www/html/ajt_viajes/public>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog  ${APACHE_LOG_DIR}/viajesajt-error.log
+    CustomLog ${APACHE_LOG_DIR}/viajesajt-access.log combined
+</VirtualHost>
+```
+
+```apacheconf Sub-directory (XAMPP / localhost/ajt_viajes)
+# Inside your main httpd.conf or a conf.d include:
+Alias /ajt_viajes /var/www/html/ajt_viajes/public
+
+<Directory /var/www/html/ajt_viajes/public>
+    Options -Indexes +FollowSymLinks
+    AllowOverride All
+    Require all granted
+</Directory>
+```
+</CodeGroup>
+
+After editing the config, reload Apache:
+
+```bash
+# Linux (systemd)
+sudo systemctl reload apache2
+
+# macOS (Homebrew)
+brew services restart httpd
+
+# Windows XAMPP — use the XAMPP Control Panel
+```
+
+<Warning>
+  If you skip `AllowOverride All`, Apache will ignore `public/.htaccess` and every URL except `/` will return a 404.
+</Warning>
+
+### Understand the `.htaccess` Front-Controller Rules
+
+The file at `public/.htaccess` implements the front-controller pattern. It redirects all requests that don't match a real file or directory to `index.php`:
+
+```apacheconf
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+```
+
+This means that `/catalog`, `/auth/login`, `/paquete/cusco-valle-sagrado-machu-picchu`, and every other application route are all handled by a single PHP file. Static assets under `public/assets/` are served directly by Apache and are **not** rewritten.
+
+<Note>
+  `mod_rewrite` must be enabled in Apache. On Ubuntu/Debian, run `sudo a2enmod rewrite` and reload Apache.
+</Note>
+
+### Create the MySQL Database
+
+The database is created and populated by two SQL files that must be executed **in order**.
+
+**Step 1 — Run the schema** (creates the database and all tables):
+
+```bash
+mysql -u root -p < database/schema.sql
+```
+
+This creates the `viajes_ajt_3fn` database with `CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci` and defines all 16 tables, including `paquetes`, `reservas`, `usuarios`, `configuracion`, and the supporting lookup tables.
+
+**Step 2 — Run the seed** (populates initial and demo data):
+
+```bash
+mysql -u root -p < database/seed.sql
+```
+
+The seed file inserts demo travel packages, categories, cities, countries, payment methods, roles, configuration settings (payment details, agency info), and sample users and bookings so that the application is immediately functional.
+
+<Warning>
+  Always run `schema.sql` **before** `seed.sql`. The seed file calls `USE viajes_ajt_3fn` and depends on all tables already existing. Running them in reverse order will produce foreign key errors.
+</Warning>
+
+### Configure Database Credentials
+
+Open `app/Config/LocalConfig.php` and update the database constants to match your local environment:
+
+```php
+public const DB_HOST = '127.0.0.1';
+public const DB_PORT = 3306;
+public const DB_NAME = 'viajes_ajt_3fn';
+public const DB_USER = 'root';
+public const DB_PASS = '';         // ← Set your MySQL password here
+```
+
+See the [Configuration](/configuration) page for the full list of constants and their purpose.
+
+### Understand the PSR-4 Autoloader
+
+The application does **not** use Composer. Instead, `public/index.php` registers a custom PSR-4 autoloader at startup that maps the `App\` namespace to the `app/` directory:
+
+```php
+spl_autoload_register(function (string $class): void {
+    $prefix  = 'App\\';
+    $baseDir = dirname(__DIR__) . '/app/';
+    $len     = strlen($prefix);
+
+    if (strncmp($prefix, $class, $len) !== 0) {
+        return;
+    }
+
+    $relativeClass = substr($class, $len);
+    $file = $baseDir . str_replace('\\', '/', $relativeClass) . '.php';
+
+    if (file_exists($file)) {
+        require_once $file;
+    }
+});
+```
+
+For example, `App\Controllers\CatalogController` maps to `app/Controllers/CatalogController.php`, and `App\Config\Database` maps to `app/Config/Database.php`. No additional tooling is required.
+
+### Review Session Configuration
+
+Sessions are configured in `public/index.php` before any controller runs. The session name and cookie parameters are set as follows:
+
+```php
+session_name('VIAJESAJTSESSID');
+
+session_set_cookie_params([
+    'lifetime' => 0,          // Session cookie — expires when browser closes
+    'path'     => '/',
+    'httponly' => true,        // Not accessible via JavaScript
+    'secure'   => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+    'samesite' => 'Lax',       // CSRF mitigation for cross-site navigation
+]);
+
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+```
+
+The `secure` flag is automatically set to `true` when the request is served over HTTPS. No manual changes are required for local development over plain HTTP.
+
+### Access the Application
+
+Open your browser and navigate to the URL that matches your Apache setup:
+
+| Setup | URL |
+|---|---|
+| Named virtual host (`viajesajt.local`) | `http://viajesajt.local/` |
+| XAMPP sub-directory | `http://localhost/ajt_viajes/` |
+| Direct `public/` access | `http://localhost/ajt_viajes/public/` |
+
+The `BASE_URL` constant is calculated automatically in `index.php` by comparing `SCRIPT_FILENAME` against `DOCUMENT_ROOT`, so the application works correctly at any path depth — no manual configuration of a base URL is needed.
+
+</Steps>
+
+---
+
+## Verifying the Installation
+
+After completing the steps above, confirm each of the following URLs loads correctly:
+
+| Route | Expected Result |
+|---|---|
+| `/` | Home page with featured travel packages |
+| `/catalog` | Public package catalogue with search and filter |
+| `/auth/login` | Client login form |
+| `/admin/login` | Admin login form |
+
+<Note>
+  The seed file inserts two demo accounts. Use `admin@viajesajt.com` (role: Administrador) or `cliente@viajesajt.com` (role: Cliente) to log in immediately. Both accounts use the password stored in their respective `password_hash` fields (bcrypt-hashed).
+</Note>
+
+If any route returns a 404, double-check that `mod_rewrite` is enabled and `AllowOverride All` is set on the `public/` directory. If you see a database error, verify the credentials in `app/Config/LocalConfig.php` and confirm that both SQL files were executed successfully.

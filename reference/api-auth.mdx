@@ -1,0 +1,372 @@
+---
+title: "Authentication API: Login, Register, and Session Endpoints"
+sidebarTitle: "Auth API"
+description: "HTTP endpoints for user authentication in Viajes AJT — login, registration, logout, email validation, and session-based access control."
+---
+
+Viajes AJT uses **PHP session-based authentication** — there are no API tokens or JWTs. All protected pages check for a valid `$_SESSION['usuario']` key. The session cookie is named `VIAJESAJTSESSID` and is configured `HttpOnly`, `SameSite=Lax`, and `Secure` on HTTPS deployments. The platform has two roles: `id_rol = 1` (client) and `id_rol = 2` (administrator). After a successful login, the user is routed to `/` (clients) or `/admin/dashboard` (admins).
+
+<Note>
+  **CSRF protection is enforced globally on every `POST` request.** All forms
+  must include a hidden field named `csrf_token` containing the value generated
+  by `Csrf::token()`. Requests without a valid token receive `HTTP 403`. This
+  requirement applies to every POST endpoint documented on this page.
+</Note>
+
+---
+
+## `GET /auth/login`
+
+<Note>
+  Alias: `GET /login`. Both routes dispatch to `AuthController@login`.
+</Note>
+
+Renders the HTML login form. If the requesting user already has an active session (`$_SESSION['usuario']` is set), they are immediately redirected to their role-specific dashboard — clients go to `/`, admins go to `/admin/dashboard`.
+
+### Request
+
+```http
+GET /auth/login HTTP/1.1
+Host: yourdomain.com
+```
+
+### Response
+
+| Condition                           | HTTP Status | Action                                       |
+| ----------------------------------- | ----------- | -------------------------------------------- |
+| No active session                   | `200`       | Renders HTML login form                      |
+| Active session, `id_rol = 1`        | `302`       | Redirects to `/`                             |
+| Active session, `id_rol = 2`        | `302`       | Redirects to `/admin/dashboard`              |
+
+---
+
+## `POST /auth/login`
+
+<Note>
+  Alias: `POST /login`. Both routes dispatch to `AuthController@procesarLogin`.
+</Note>
+
+Processes login credentials. On success, regenerates the session ID and sets the `$_SESSION['usuario']` key. Implements dual-axis rate limiting to prevent brute-force attacks.
+
+### Request
+
+```http
+POST /auth/login HTTP/1.1
+Host: yourdomain.com
+Content-Type: application/x-www-form-urlencoded
+
+email=ana.garcia%40example.com&password=mypassword&csrf_token=<token>
+```
+
+### Body Parameters
+
+<ParamField body="email" type="string" required>
+  The user's registered email address. The special alias `admin` is expanded to
+  `admin@viajesajt.com` for legacy CLI access. Trimmed before use.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The user's plain-text password. Verified against the stored bcrypt hash using
+  `password_verify()`. Never stored — only the hash is persisted.
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF protection token. Must match the value stored in the current session via
+  `Csrf::token()`. Missing or invalid tokens return HTTP 403.
+</ParamField>
+
+### Rate Limiting
+
+The login handler applies **two independent rate limiters** in parallel:
+
+| Axis       | Key format              | Max attempts | Window   | On breach         |
+| ---------- | ----------------------- | ------------ | -------- | ----------------- |
+| IP address | `login:ip:{ip}`         | 10 requests  | 15 min   | HTTP 429          |
+| Email      | `login:email:{email}`   | 5 requests   | 15 min   | HTTP 429          |
+
+Rate limit counters are stored in the `rate_limits` table and are **only incremented on failed login attempts**. On a successful login both counters are cleared via `RateLimiter::clear()`.
+
+When either limit is breached the response is:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 900
+```
+
+A flash warning message is also stored in session for display in the login view.
+
+When the email counter has between 1 and 4 remaining attempts, the response includes an informational flash message (e.g., *"Te quedan 2 intentos de inicio de sesión."*).
+
+### Success Flow
+
+1. `password_verify()` passes.
+2. `session_regenerate_id(true)` is called (session fixation protection).
+3. `$_SESSION['usuario']` is populated:
+
+```php
+$_SESSION['usuario'] = [
+    'id_usuario' => $user['id_usuario'],  // int
+    'id_rol'     => $user['id_rol'],      // 1 = client, 2 = admin
+    'nombres'    => $user['nombres'],
+    'apellidos'  => $user['apellidos'],
+    'email'      => $user['email'],
+];
+```
+
+4. Redirect logic (first match wins):
+   - If `id_rol = 1` and `$_SESSION['pending_booking']` exists → redirect to `/checkout?paquete=...&fecha_viaje=...&viajeros=...` (booking intent preserved across login).
+   - If `id_rol = 1` and `$_SESSION['pending_visa']` exists → redirect to `/visas`.
+   - Otherwise → redirect to role dashboard (`/` or `/admin/dashboard`).
+
+### Failure Flow
+
+- Flash error: *"Credenciales incorrectas. Verifique su correo y contraseña."*
+- Redirect to `GET /auth/login`.
+
+### Response Summary
+
+| Condition                      | HTTP Status | Action                                       |
+| ------------------------------ | ----------- | -------------------------------------------- |
+| Success                        | `302`       | Redirect to dashboard or pending URL         |
+| Invalid credentials            | `302`       | Redirect to login with flash error           |
+| Rate limit exceeded            | `429`       | Error response + `Retry-After: 900` header   |
+| Missing email or password      | `302`       | Redirect to login with flash error           |
+
+---
+
+## `GET /auth/registro`
+
+<Note>
+  Alias: `GET /registro`. Both routes dispatch to `AuthController@registro`.
+</Note>
+
+Renders the HTML client registration form. Authenticated users are redirected to their dashboard immediately.
+
+### Request
+
+```http
+GET /auth/registro HTTP/1.1
+Host: yourdomain.com
+```
+
+### Response
+
+| Condition            | HTTP Status | Action                                  |
+| -------------------- | ----------- | --------------------------------------- |
+| No active session    | `200`       | Renders HTML registration form          |
+| Active session       | `302`       | Redirects to role dashboard             |
+
+---
+
+## `POST /auth/registro`
+
+Handler: `AuthController@procesarRegistro`. Creates a new client account (`id_rol = 1`), logs the user in immediately, and redirects to profile — or to a pending booking/visa if one was stored in session before the user was prompted to register.
+
+### Request
+
+```http
+POST /auth/registro HTTP/1.1
+Host: yourdomain.com
+Content-Type: application/x-www-form-urlencoded
+
+nombres=Ana+Maria&apellidos=García+López&email=ana%40example.com&telefono=987654321&password=mysecret&dni_pasaporte=12345678&csrf_token=<token>
+```
+
+### Body Parameters
+
+<ParamField body="nombres" type="string" required>
+  First name(s). Must be 2–100 characters. Only Unicode letters and spaces
+  allowed (`/^[\p{L}\s]+$/u`). Both the length and character checks are
+  enforced server-side.
+</ParamField>
+
+<ParamField body="apellidos" type="string" required>
+  Last name(s). Same rules as `nombres`: 2–100 characters, letters and spaces
+  only.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Valid email address (`FILTER_VALIDATE_EMAIL`). Must not already exist in the
+  `usuarios` table. Trimmed before validation.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Desired password. Minimum 6 characters. Stored as a bcrypt hash
+  (`PASSWORD_BCRYPT`); the plain-text value is never persisted.
+</ParamField>
+
+<ParamField body="telefono" type="string">
+  Contact phone number. Optional, but when provided it must yield 7–15 digits
+  after stripping non-numeric characters.
+</ParamField>
+
+<ParamField body="dni_pasaporte" type="string" required>
+  National ID or passport number. Must be 6–20 characters. Stored in
+  `usuarios.dni_pasaporte` (UNIQUE constraint).
+</ParamField>
+
+<ParamField body="csrf_token" type="string" required>
+  CSRF protection token. See the note at the top of this page.
+</ParamField>
+
+### Rate Limiting
+
+| Axis       | Key format          | Max attempts | Window   |
+| ---------- | ------------------- | ------------ | -------- |
+| IP address | `registro:{ip}`     | 3 accounts   | 60 min   |
+
+### Validation Rules Summary
+
+| Field           | Rule                                                      |
+| --------------- | --------------------------------------------------------- |
+| `nombres`       | Required, 2–100 chars, letters + spaces only              |
+| `apellidos`     | Required, 2–100 chars, letters + spaces only              |
+| `email`         | Required, valid format, not already registered            |
+| `password`      | Required, minimum 6 characters                            |
+| `telefono`      | Optional; if provided, 7–15 digits                        |
+| `dni_pasaporte` | Required, 6–20 characters                                 |
+
+### Success Flow
+
+1. Validation passes; email uniqueness confirmed.
+2. Password hashed with `password_hash($password, PASSWORD_BCRYPT)`.
+3. Row inserted into `usuarios` with `id_rol = 1`.
+4. Session started: `session_regenerate_id(true)` + `$_SESSION['usuario']` set.
+5. Redirect (first match):
+   - `pending_booking` in session → `/checkout?paquete=...`
+   - `pending_visa` in session → `/visas`
+   - Default → `/profile/mi-perfil`
+
+### Failure Flow
+
+- All validation errors are collected and joined with `<br>` for display.
+- POST data (`nombres`, `apellidos`, `email`, `telefono`, `dni_pasaporte`) is preserved in `$_POST` so the form can be re-populated.
+- Redirect to `GET /auth/registro` with flash error.
+
+### Response Summary
+
+| Condition                    | HTTP Status | Action                                      |
+| ---------------------------- | ----------- | ------------------------------------------- |
+| Success                      | `302`       | Redirect to profile or pending URL          |
+| Validation failure           | `302`       | Redirect to form with flash errors          |
+| Email already registered     | `302`       | Redirect to form with specific flash error  |
+| Rate limit exceeded          | `302`       | Redirect to form with rate-limit error      |
+
+---
+
+## `POST /auth/logout`
+
+<Note>
+  Alias: `POST /logout`. Both routes dispatch to `AuthController@logout`.
+</Note>
+
+Destroys the active PHP session, expires the session cookie, and redirects to the login page. **Only the POST method is accepted** — `GET /logout` and `GET /auth/logout` respond with an error message instead of logging the user out (CSRF protection).
+
+### Request
+
+```http
+POST /auth/logout HTTP/1.1
+Host: yourdomain.com
+Content-Type: application/x-www-form-urlencoded
+
+csrf_token=<token>
+```
+
+### Logout Sequence
+
+1. `$_SESSION = []` — clears all session data in memory.
+2. `setcookie(session_name(), '', time() - 42000, ...)` — expires the `VIAJESAJTSESSID` cookie in the browser.
+3. `session_destroy()` — removes the server-side session file.
+4. `session_start()` — starts a fresh anonymous session.
+5. Flash success: *"Sesión cerrada correctamente."*
+6. Redirect → `GET /auth/login`.
+
+### GET /logout — Security Note
+
+<Warning>
+  `GET /logout` and `GET /auth/logout` do **not** log the user out. They set a
+  flash error message (*"Para cerrar sesión use el botón seguro del sitio."*)
+  and redirect to `/auth/login`. This prevents CSRF logout attacks via
+  `<img src="/logout">` or similar vectors.
+</Warning>
+
+### Response Summary
+
+| Method | Condition            | HTTP Status | Action                                |
+| ------ | -------------------- | ----------- | ------------------------------------- |
+| `POST` | Valid CSRF token     | `302`       | Session destroyed, redirect to login  |
+| `GET`  | Any                  | `302`       | Flash error, redirect to login        |
+
+---
+
+## `GET /api/validar-email`
+
+Handler: `AuthController@validateEmail`. AJAX endpoint used by the registration form to check in real time whether an email address is already registered. Returns JSON.
+
+### Request
+
+```http
+GET /api/validar-email?email=ana%40example.com HTTP/1.1
+Host: yourdomain.com
+Accept: application/json
+```
+
+### Query Parameters
+
+<ParamField query="email" type="string" required>
+  The email address to validate. Must pass `FILTER_VALIDATE_EMAIL` before a
+  database lookup is attempted. Trimmed before validation.
+</ParamField>
+
+### Response
+
+`Content-Type: application/json; charset=UTF-8`
+
+#### Email is available
+
+```json
+{
+  "valid": true
+}
+```
+
+#### Email already registered
+
+```json
+{
+  "valid": false,
+  "message": "Este correo ya está registrado."
+}
+```
+
+#### Invalid email format
+
+```json
+{
+  "valid": false,
+  "message": "Formato de correo inválido."
+}
+```
+
+#### Server error
+
+```json
+{
+  "valid": false,
+  "message": "Error al verificar el correo."
+}
+```
+
+HTTP status `500` is returned on database errors.
+
+### Response Fields
+
+<ResponseField name="valid" type="boolean">
+  `true` if the email is not yet registered and has a valid format. `false` in
+  all other cases.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable reason when `valid` is `false`. Not present when `valid` is
+  `true`.
+</ResponseField>

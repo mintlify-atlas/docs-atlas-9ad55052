@@ -1,0 +1,115 @@
+{
+  "projectType": "saas",
+  "projectName": "Viajes AJT",
+  "projectDescription": "A full-stack PHP travel agency platform that lets customers browse, book, and pay for tour packages and visa advisory services, with a complete admin back-office for managing packages, reservations, users, and sales reports.",
+  "theme": "almond",
+  "primaryColor": "#1b2c8a",
+  "lightColor": "#eef1ff",
+  "darkColor": "#070d3a",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Overview",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "configuration"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/catalog",
+              "features/booking",
+              "features/visa-advisory",
+              "features/user-accounts"
+            ]
+          },
+          {
+            "group": "Admin Panel",
+            "pages": [
+              "admin/overview",
+              "admin/packages",
+              "admin/reservations",
+              "admin/users",
+              "admin/reports"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Technical Reference",
+        "groups": [
+          {
+            "group": "Architecture",
+            "pages": [
+              "reference/architecture",
+              "reference/routing",
+              "reference/database-schema"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "reference/security",
+              "reference/rate-limiting"
+            ]
+          },
+          {
+            "group": "API Endpoints",
+            "pages": [
+              "reference/api-catalog",
+              "reference/api-auth",
+              "reference/api-booking"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Tour package catalog with filtering, search, and detail pages",
+    "Multi-step booking checkout with support for Yape, bank transfer, and card payment",
+    "Visa advisory service with status tracking",
+    "Role-based authentication (client vs. administrator) with session management",
+    "Admin dashboard with KPIs, monthly income charts, and destination distribution",
+    "Package CRUD with image gallery management and itinerary editor",
+    "Reservation management with status changes and CSV export",
+    "User management with role promotion and administrator creation",
+    "CSRF protection on all POST forms",
+    "MySQL-backed rate limiting for login, registration, and contact forms",
+    "Dark mode design with CSS custom properties design tokens",
+    "PSR-4 autoloader with MVC architecture (no external framework)"
+  ],
+  "publicApiSurface": [
+    "GET /catalog — public package listing",
+    "GET /paquete/{slug} — package detail page",
+    "GET /api/paquetes/buscar — JSON package search",
+    "GET /visas — visa advisory services listing",
+    "POST /visas/solicitar — submit visa advisory request",
+    "GET /checkout?paquete={slug} — booking checkout form",
+    "POST /booking/procesar-checkout — process booking and payment",
+    "GET /auth/login, POST /auth/login — user login",
+    "GET /auth/registro, POST /auth/registro — user registration",
+    "POST /auth/logout — user logout",
+    "GET /api/validar-email — AJAX email uniqueness check",
+    "GET /profile/mi-perfil — user profile and bookings",
+    "POST /profile/guardar-cuenta — update account details",
+    "POST /profile/cambiar-password — change password",
+    "GET /profile/comprobante/{codigo} — view payment receipt",
+    "GET /admin/dashboard — admin KPI dashboard",
+    "GET /admin/ventas — sales & revenue report",
+    "GET /admin/reservas — reservations management",
+    "GET /admin/usuarios — user management",
+    "POST /admin/paquetes/store — create package",
+    "POST /admin/paquetes/update/{id} — update package",
+    "POST /admin/paquetes/delete/{id} — delete package",
+    "POST /admin/reservas/cambiar-estado — update reservation status",
+    "POST /admin/usuarios/update-rol — change user role",
+    "GET /admin/visas — admin visa requests",
+    "POST /admin/visas/update-estado — update visa request status"
+  ]
+}

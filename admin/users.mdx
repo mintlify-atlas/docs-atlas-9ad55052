@@ -1,0 +1,143 @@
+---
+title: "User Management: Roles, Admins, and Account Control"
+sidebarTitle: "Users"
+description: "How to view all registered users, promote clients to admin, register new administrator accounts, and update user roles in Viajes AJT."
+---
+
+The Users module, managed by `AdminController`, provides a full view of every account registered in Viajes AJT. Administrators can inspect client and admin lists, change any user's role, and create brand-new administrator accounts — all from the panel at `/admin/usuarios`.
+
+## Route Reference
+
+| Method | Route | Action |
+|---|---|---|
+| `GET` | `/admin/usuarios` | List all users with role, registration date, and booking count |
+| `POST` | `/admin/usuarios/registrar-administrador` | Create a new account with `id_rol = 2` |
+| `POST` | `/admin/usuarios/update-rol` | Change the role of an existing user |
+
+## User List
+
+`GET /admin/usuarios` calls `Reporte::getUsuariosList()`, which returns:
+
+- `total_clientes` — count of users with `id_rol = 1`
+- `total_admins` — count of users with `id_rol = 2`
+- `usuarios` — full user list joined with the `roles` table and a subquery counting each user's reservations
+
+```sql
+SELECT u.*, r.nombre_rol,
+       (SELECT COUNT(*) FROM reservas res WHERE res.id_usuario = u.id_usuario) AS reservas_count
+FROM usuarios u
+INNER JOIN roles r ON u.id_rol = r.id_rol
+ORDER BY u.id_usuario DESC
+```
+
+### User Fields
+
+| Field | Column | Constraints |
+|---|---|---|
+| First name | `nombres` | `VARCHAR(80)`, letters and spaces only, 2–100 chars |
+| Last name | `apellidos` | `VARCHAR(80)`, letters and spaces only, 2–100 chars |
+| Email | `email` | `VARCHAR(120)`, `UNIQUE`, validated with `FILTER_VALIDATE_EMAIL` |
+| Phone | `telefono` | `VARCHAR(20)`, optional, 7–15 digits |
+| ID / Passport | `dni_pasaporte` | `VARCHAR(20)`, `UNIQUE`, 6–20 characters |
+| Nationality | `id_pais_nacionalidad` | FK → `paises`, nullable |
+| Registered | `created_at` | `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` |
+
+## Role System
+
+Roles are defined in the `roles` table and referenced by `usuarios.id_rol`:
+
+| `id_rol` | `nombre_rol` | Capabilities |
+|---|---|---|
+| `1` | Cliente | Browse catalog, make reservations, manage own profile |
+| `2` | Administrador | Full access to all `/admin/` routes |
+
+<Warning>
+  An admin cannot change their own role. The `updateRol` action explicitly checks that `id_usuario` in the POST body does not match the currently authenticated session user:
+
+  ```php
+  if ($id_usuario === (int)$_SESSION['usuario']['id_usuario']) {
+      $_SESSION['error'] = "No puede modificar los privilegios de su propia cuenta.";
+      header('Location: ' . BASE_URL . '/admin/usuarios');
+      exit();
+  }
+  ```
+</Warning>
+
+## Updating a User's Role
+
+POST to `/admin/usuarios/update-rol` with:
+
+```http
+POST /admin/usuarios/update-rol HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+id_usuario=17&id_rol=2
+```
+
+Only `id_rol = 1` (client) and `id_rol = 2` (administrator) are accepted. Any other value causes the request to be rejected with a session error. The update is executed via `Usuario::updateRol()`:
+
+```php
+// Usuario::updateRol()
+$stmt = $db->prepare("UPDATE usuarios SET id_rol = :id_rol WHERE id_usuario = :id_usuario");
+return $stmt->execute([':id_rol' => $id_rol, ':id_usuario' => $id_usuario]);
+```
+
+## Registering a New Administrator
+
+POST to `/admin/usuarios/registrar-administrador`. The endpoint creates a new `usuarios` row with `id_rol = 2` using the same `Usuario::create()` method used for client registration, but with the role explicitly overridden.
+
+### Required Fields
+
+| Field | Validation Rule |
+|---|---|
+| `nombres` | 2–100 characters, letters and spaces only |
+| `apellidos` | 2–100 characters, letters and spaces only |
+| `email` | Valid email format; must not already exist in `usuarios.email` |
+| `dni_pasaporte` | 6–20 characters |
+| `password` | Minimum 8 characters |
+| `password_confirm` | Must match `password` |
+
+`telefono` is optional; if provided, it must contain 7–15 digits.
+
+### Password Security
+
+Passwords are **never stored in plain text**. Before being saved, the plain-text password is hashed with PHP's `PASSWORD_BCRYPT` algorithm:
+
+```php
+Usuario::create([
+    'id_rol'        => 2,
+    'nombres'       => $nombres,
+    'apellidos'     => $apellidos,
+    'email'         => $email,
+    'password_hash' => password_hash($password, PASSWORD_BCRYPT),
+    'dni_pasaporte' => $dni,
+    'telefono'      => $telefono !== '' ? $telefono : null,
+]);
+```
+
+<Note>
+  Before the DB insert, the controller calls `Usuario::findByEmail($email)` to check uniqueness at the application layer. The `UNIQUE` constraint on `usuarios.email` provides a second safety net at the database level.
+</Note>
+
+### Validation Error Handling
+
+If any validation check fails, error messages are accumulated in `$errores[]` and stored as a single concatenated string in `$_SESSION['error']`. The submitted form data (excluding passwords) is preserved in `$_SESSION['admin_form_data']` so the user does not have to retype it.
+
+```php
+$_SESSION['error'] = implode(' ', $errores);
+$_SESSION['admin_form_data'] = compact('nombres', 'apellidos', 'email', 'telefono', 'dni');
+header('Location: ' . BASE_URL . '/admin/usuarios?tab=admins&new=1');
+```
+
+On success, the user is redirected to `/admin/usuarios?tab=admins` with a success flash message.
+
+## Database Constraints Summary
+
+The `usuarios` table in `schema.sql` enforces the following uniqueness constraints at the database level, independent of any application-layer checks:
+
+| Column | Constraint |
+|---|---|
+| `email` | `UNIQUE` |
+| `dni_pasaporte` | `UNIQUE` |
+
+These constraints prevent duplicate accounts even in edge cases such as simultaneous registrations or direct database inserts that bypass the controller.

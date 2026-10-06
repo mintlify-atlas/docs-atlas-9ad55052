@@ -1,0 +1,179 @@
+---
+title: "Viajes AJT MVC Architecture and Project Structure"
+sidebarTitle: "Architecture"
+description: "How Viajes AJT's custom PHP MVC framework is organized — PSR-4 autoloading, front controller, request lifecycle, and directory layout."
+---
+
+Viajes AJT is built on a hand-rolled PHP MVC framework with no external Composer dependencies. Every HTTP request enters through a single front controller (`public/index.php`), is routed to the appropriate controller via a custom `Router`, and rendered through PHP template views wrapped in shared layouts. The architecture is intentionally lean — no third-party framework overhead, full control over the request pipeline, and a clear separation between configuration, business logic, and presentation.
+
+## Single Entry Point
+
+All traffic is directed to `public/index.php` via an `.htaccess` rewrite rule. This file is the only public PHP script; everything else lives outside the document root or in protected directories. The front controller is responsible for bootstrapping the entire application before handing off to the router.
+
+## PSR-4 Autoloader
+
+Before any application class is used, `index.php` registers a custom PSR-4 autoloader with `spl_autoload_register`. It maps the `App\` namespace prefix to the `app/` directory:
+
+```php
+spl_autoload_register(function (string $class): void {
+    $prefix = 'App\\';
+    $baseDir = dirname(__DIR__) . '/app/';
+    $len = strlen($prefix);
+    if (strncmp($prefix, $class, $len) !== 0) {
+        return;
+    }
+    $relativeClass = substr($class, $len);
+    $file = $baseDir . str_replace('\\', '/', $relativeClass) . '.php';
+    if (file_exists($file)) {
+        require_once $file;
+    }
+});
+```
+
+For example, `App\Controllers\CatalogController` resolves to `app/Controllers/CatalogController.php`. No Composer autoload file is needed.
+
+## Request Lifecycle
+
+Every request flows through the following sequence before a controller method is called:
+
+<Steps>
+  <Step title="PSR-4 Autoloader Registered">
+    `spl_autoload_register` is called, mapping the `App\` namespace to `app/`. This must happen before any other class is referenced.
+  </Step>
+  <Step title="Global Error Handlers Installed">
+    `ErrorHandler::register((bool)$debug)` sets up a custom exception handler, a PHP error handler that converts errors to `ErrorException`, and a shutdown function that catches fatal errors. The `$debug` flag is read from `LocalConfig::APP_DEBUG` (`false` in production).
+  </Step>
+  <Step title="HTTP Security Headers Applied">
+    `SecurityHeaders::apply()` writes all security-related HTTP headers — CSP, `X-Frame-Options`, HSTS, and others — before any output is produced. See the [Security](/reference/security) page for the full header list.
+  </Step>
+  <Step title="BASE_URL Calculated">
+    A `BASE_URL` constant is derived by comparing `SCRIPT_FILENAME` against `DOCUMENT_ROOT`. The `/public` path segment is stripped so that URLs work correctly whether accessed directly or through an `.htaccess` rewrite from the project root.
+
+    ```php
+    $scriptFilename = str_replace('\\', '/', $_SERVER['SCRIPT_FILENAME'] ?? '');
+    $docRoot = str_replace('\\', '/', rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/'));
+
+    if ($docRoot !== '' && strpos($scriptFilename, $docRoot) === 0) {
+        $basePath = dirname(substr($scriptFilename, strlen($docRoot)));
+        $basePath = $basePath === '/' ? '' : $basePath;
+    } else {
+        $basePath = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+    }
+
+    define('BASE_URL', $scheme . '://' . $host . $basePath);
+    ```
+  </Step>
+  <Step title="Session Started">
+    The session is configured with a custom name (`VIAJESAJTSESSID`) and secure cookie parameters before `session_start()` is called:
+
+    ```php
+    session_name('VIAJESAJTSESSID');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'httponly' => true,
+        'secure'   => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+        'samesite' => 'Lax',
+    ]);
+    ```
+  </Step>
+  <Step title="CSRF Token Initialized and POST Requests Verified">
+    `Csrf::token()` is called to ensure a 64-character hex token exists in the session. For every incoming POST request (outside CLI), the token is read from `$_POST['csrf_token']` and verified with `Csrf::verifyToken()`. A mismatch returns an HTTP 403 page immediately — before any route is matched.
+  </Step>
+  <Step title="Routes Registered">
+    A `Router` instance is created and all application routes are registered with `$router->add($path, 'Controller@method', 'HTTP_METHOD')`. Routes are grouped by feature: catalog, auth, booking, profile, visas, admin packages, admin general, contact, legal, and reclamaciones.
+  </Step>
+  <Step title="Checkout Slug Alias Resolved">
+    Before dispatch, `index.php` checks if the request path matches `checkout/{slug}`. If so, it rewrites `$_GET['paquete']` and `$dispatchUri` to the canonical `checkout?paquete={slug}` form, allowing pretty URLs for the checkout flow.
+  </Step>
+  <Step title="Router::dispatch() Called">
+    `$router->dispatch($dispatchUri)` strips the project prefix and any `/public` segment from the URI, matches against registered routes (including dynamic `{param}` segments), instantiates the resolved `App\Controllers\{Name}` class, and calls the target method with captured URL parameters. Falls through to a 404 view if no route matches.
+  </Step>
+</Steps>
+
+## Directory Structure
+
+```
+ajt_viajes/
+├── public/                    # Document root — only directory exposed to the web
+│   ├── index.php              # Front controller (single entry point)
+│   ├── .htaccess              # Rewrites all requests to index.php
+│   ├── assets/                # CSS, JS, images (publicly served)
+│   └── uploads/               # User-uploaded files (e.g. payment receipts)
+│
+├── app/
+│   ├── Config/
+│   │   ├── Router.php         # Route registry and dispatcher
+│   │   ├── Database.php       # PDO singleton (reads credentials from LocalConfig)
+│   │   └── LocalConfig.php    # Environment constants (APP_ENV, DB_*, APP_DEBUG)
+│   │
+│   ├── Controllers/
+│   │   ├── BaseController.php # Shared helpers: render, redirect, json, setFlash, requireRole
+│   │   ├── HomeController.php
+│   │   ├── CatalogController.php
+│   │   ├── AuthController.php
+│   │   ├── BookingController.php
+│   │   ├── ProfileController.php
+│   │   ├── VisaController.php
+│   │   ├── PaqueteController.php
+│   │   ├── AdminController.php
+│   │   ├── ContactoController.php
+│   │   ├── LegalController.php
+│   │   └── ReclamacionController.php
+│   │
+│   ├── Models/                # PDO-based data-access objects (one per entity)
+│   │
+│   ├── Helper/
+│   │   ├── Csrf.php           # CSRF token generation and verification
+│   │   ├── RateLimiter.php    # MySQL-backed rate limiting
+│   │   ├── SecurityHeaders.php# HTTP security headers
+│   │   ├── ErrorHandler.php   # Global error/exception handling
+│   │   └── Config.php         # Runtime config helpers
+│   │
+│   ├── Services/
+│   │   └── ImageUrlService.php# Resolves storage vs. URL paths for images
+│   │
+│   └── Views/
+│       ├── layouts/           # header.php, footer.php, admin_header.php, admin_footer.php
+│       ├── errors/            # 404.php, 429.php, 500.php
+│       └── <feature>/         # One subdirectory per controller (auth/, catalog/, admin/, …)
+│
+└── database/
+    ├── schema.sql             # Table definitions — run first
+    └── seed.sql               # Demo data — run after schema.sql
+```
+
+## BaseController Helpers
+
+All feature controllers extend `App\Controllers\BaseController`, which exposes the following protected methods:
+
+| Method | Signature | Purpose |
+|---|---|---|
+| `render` | `render(string $view, array $data = [], string $layout = 'main'): void` | Renders a view file wrapped in the specified layout (`main` or `admin`) |
+| `redirect` | `redirect(string $path): never` | Issues a `Location` header relative to `BASE_URL` and exits |
+| `json` | `json(mixed $data, int $statusCode = 200): never` | Serializes `$data` as JSON, sets correct `Content-Type`, and exits |
+| `setFlash` | `setFlash(string $type, string $message): void` | Stores a flash message in `$_SESSION[$type]` (types: `success`, `error`, `warning`, `info`) |
+| `requireMethod` | `requireMethod(string $method, string $redirect = '/'): void` | Redirects if the HTTP method does not match the expected value |
+| `getDashboardPath` | `getDashboardPath(int $roleId): string` | Returns `/admin/dashboard` for `id_rol = 2`, `/profile/mi-perfil` for clients |
+
+<Note>
+  `render()` uses `extract($data)` to make array keys available as variables inside the view template. Avoid passing untrusted keys in `$data` to prevent variable injection into the view scope.
+</Note>
+
+## Database Connection
+
+`App\Config\Database` implements the Singleton pattern. The first call to `Database::getConnection()` creates a PDO connection using credentials from `LocalConfig`. Subsequent calls return the same instance. The connection is always configured with:
+
+```php
+PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+PDO::ATTR_EMULATE_PREPARES   => false,
+```
+
+<Warning>
+  `LocalConfig.php` contains database credentials as PHP constants and is committed to the repository. In a production deployment, replace these constants with values loaded from environment variables or a secrets manager, and ensure `LocalConfig.php` is excluded from version control via `.gitignore`.
+</Warning>
+
+## No External Dependencies
+
+Viajes AJT intentionally has no `composer.json`. There are no vendor packages, no autoload files to generate, and no lock file to maintain. Deployment is as simple as copying the repository to the server — the only runtime requirement is PHP 8.1+ with the `pdo_mysql` extension enabled.

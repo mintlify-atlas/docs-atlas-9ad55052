@@ -1,0 +1,230 @@
+---
+title: "Configure Database, Environment, and Payment Settings"
+sidebarTitle: "Configuration"
+description: "Configure Viajes AJT database credentials, debug mode, session security, and payment gateway options from LocalConfig and the admin settings panel."
+---
+
+Viajes AJT uses a single PHP constants file — `app/Config/LocalConfig.php` — as its only environment configuration source. There is no `.env` file or external secrets manager; all deployment-specific values are set as PHP `const` declarations. Runtime configuration such as payment details, agency contact information, and currency symbols is stored in the `configuracion` database table and is editable at any time through the admin panel at `/admin/ajustes`.
+
+---
+
+## `app/Config/LocalConfig.php` — Application Constants
+
+This `final` class is the single source of truth for all environment-level settings. It must be edited directly on the server before deploying.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Config;
+
+/**
+ * Clase LocalConfig
+ * Centraliza la configuración local de desarrollo de la aplicación.
+ * Reemplaza el uso de archivos .env y variables de entorno externas.
+ */
+final class LocalConfig
+{
+    public const APP_ENV = 'production';
+    public const APP_DEBUG = false;
+
+    // Configuración de base de datos
+    public const DB_HOST = '127.0.0.1';
+    public const DB_PORT = 3306;
+    public const DB_NAME = 'viajes_ajt_3fn';
+    public const DB_USER = 'root';
+    public const DB_PASS = '';
+
+    // Clave de seguridad para ejecutar el seeder vía web
+    public const SEEDER_KEY = 'change-me';
+}
+```
+
+### Constant Reference
+
+| Constant | Type | Default | Purpose |
+|---|---|---|---|
+| `APP_ENV` | `string` | `'production'` | Indicates the runtime environment. Checked by helpers that change behaviour between development and production. |
+| `APP_DEBUG` | `bool` | `false` | When `true`, the `ErrorHandler` displays full stack traces in the browser. When `false`, errors are written to the PHP error log instead. |
+| `DB_HOST` | `string` | `'127.0.0.1'` | MySQL server hostname or IP address. |
+| `DB_PORT` | `int` | `3306` | MySQL server port. |
+| `DB_NAME` | `string` | `'viajes_ajt_3fn'` | The name of the database created by `database/schema.sql`. |
+| `DB_USER` | `string` | `'root'` | MySQL username. |
+| `DB_PASS` | `string` | `''` | MySQL password. Empty by default for local development. |
+| `SEEDER_KEY` | `string` | `'change-me'` | A secret key required to trigger the database seeder via a web request. Acts as a simple one-time authorization token. |
+
+<Warning>
+  The default value `'change-me'` for `SEEDER_KEY` is publicly known. Before going live, replace it with a long, randomly generated string. Anyone who knows this key can re-seed the production database and overwrite all existing data.
+</Warning>
+
+---
+
+## `app/Config/Database.php` — PDO Singleton Connection
+
+The `Database` class provides the single, lazily-instantiated PDO connection used by every model in the application. Credentials are read directly from `LocalConfig` constants.
+
+```php
+public static function getConnection(): PDO
+{
+    if (self::$connection === null) {
+        $host    = LocalConfig::DB_HOST;
+        $port    = LocalConfig::DB_PORT;
+        $db      = LocalConfig::DB_NAME;
+        $user    = LocalConfig::DB_USER;
+        $pass    = LocalConfig::DB_PASS;
+        $charset = 'utf8mb4';
+
+        $dsn = "mysql:host={$host};port={$port};dbname={$db};charset={$charset}";
+
+        $options = [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,
+        ];
+
+        self::$connection = new PDO($dsn, $user, $pass, $options);
+    }
+
+    return self::$connection;
+}
+```
+
+### PDO Options Explained
+
+| Option | Value | Effect |
+|---|---|---|
+| `ATTR_ERRMODE` | `ERRMODE_EXCEPTION` | All database errors throw a `PDOException` rather than returning `false`. This ensures errors are never silently swallowed. |
+| `ATTR_DEFAULT_FETCH_MODE` | `FETCH_ASSOC` | Query results are returned as associative arrays by default, so column names are used as keys rather than numeric indices. |
+| `ATTR_EMULATE_PREPARES` | `false` | Native prepared statements are used. This prevents type coercion issues (e.g., integers being passed to MySQL as strings) and is more secure. |
+
+The charset `utf8mb4` in the DSN matches the database collation (`utf8mb4_unicode_ci`) set in `schema.sql`, ensuring full Unicode support including emoji and special characters.
+
+<Note>
+  Connection errors are caught internally: the original `PDOException` message (which may contain the DSN and credentials) is written to the PHP error log, and a sanitised generic message is re-thrown to the calling code. Credentials are never exposed in HTTP responses.
+</Note>
+
+---
+
+## `BASE_URL` — Automatic Base URL Detection
+
+The `BASE_URL` constant is defined in `public/index.php` and does **not** require manual configuration. It is calculated at runtime by comparing `SCRIPT_FILENAME` against `DOCUMENT_ROOT`:
+
+```php
+$scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+$host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+
+$scriptFilename = str_replace('\\', '/', $_SERVER['SCRIPT_FILENAME'] ?? '');
+$docRoot        = str_replace('\\', '/', rtrim($_SERVER['DOCUMENT_ROOT'] ?? '', '/'));
+
+if ($docRoot !== '' && strpos($scriptFilename, $docRoot) === 0) {
+    $basePath = dirname(substr($scriptFilename, strlen($docRoot)));
+    $basePath = str_replace('\\', '/', $basePath);
+    $basePath = $basePath === '/' ? '' : $basePath;
+} else {
+    $basePath = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+}
+
+define('BASE_URL', $scheme . '://' . $host . $basePath);
+```
+
+This makes `BASE_URL` work correctly regardless of whether the application is served from a virtual host root (e.g., `http://viajesajt.local`) or a sub-directory (e.g., `http://localhost/ajt_viajes`). Views and controllers use `BASE_URL` to build all internal links and asset paths.
+
+<Tip>
+  If you move the project to a different sub-path or domain, no code changes are needed. Just point Apache's `DocumentRoot` at the new `public/` location and `BASE_URL` will recalculate itself automatically.
+</Tip>
+
+---
+
+## Runtime Configuration — The `configuracion` Table
+
+All settings that the agency might need to change regularly — payment details, contact information, currency, and more — are stored as key-value rows in the `configuracion` table. They are created by `database/seed.sql` and can be updated at any time from the admin panel at `/admin/ajustes`.
+
+### Payment Gateway Keys
+
+The checkout flow reads these keys to display payment instructions and QR codes to customers. They correspond to Peru's most-used mobile payment methods and bank transfer details.
+
+| `clave` (key) | Seed value | Description |
+|---|---|---|
+| `yape_qr_url` | `assets/img/QR/yape.jpg` | Path or URL to the Yape QR code image |
+| `yape_numero` | `921 426 968` | Yape phone number |
+| `yape_titular` | `Viajes AJT Consultores S.A.C.` | Account holder name for Yape |
+| `plin_qr_url` | *(empty)* | Path or URL to the Plin QR code image |
+| `plin_numero` | `921 426 968` | Plin phone number |
+| `plin_titular` | `Viajes AJT Consultores S.A.C.` | Account holder name for Plin |
+| `banco_nombre` | `Banco de Crédito del Perú (BCP)` | Bank name for transfers |
+| `banco_cuenta` | `123-4567890123-456` | Bank account number |
+| `banco_cci` | `002-123-456789012345-67` | Interbank account code (CCI) |
+
+### Contact and Currency Keys
+
+| `clave` (key) | Seed value | Description |
+|---|---|---|
+| `contacto_telefono` | `+51 987 654 321` | Contact phone shown at checkout |
+| `contacto_email` | `reservas@viajesajt.pe` | Contact email shown at checkout |
+| `contacto_whatsapp` | `51987654321` | WhatsApp number (no `+` or spaces) |
+| `moneda_simbolo` | `S/` | Currency symbol prepended to all prices (`S/` for Peruvian sol, `$` for US dollar) |
+
+<Tip>
+  To switch the entire storefront from soles to dollars, update the single `moneda_simbolo` row to `$` in the admin settings. No code changes are required.
+</Tip>
+
+### Editing Settings in the Admin Panel
+
+All keys in the `configuracion` table are editable through the web interface without touching the database directly:
+
+1. Log in with an **Administrador** account.
+2. Navigate to **`/admin/ajustes`**.
+3. Update payment details, contact information, QR image paths, or any other setting.
+4. Click **Guardar** — changes are persisted immediately via the `AdminController@guardarAjustes` POST handler.
+
+<Note>
+  The `updated_at` column on the `configuracion` table is automatically updated to the current timestamp on every `UPDATE`, giving you a simple audit trail of when each setting was last changed.
+</Note>
+
+---
+
+## Environment Modes
+
+### Development
+
+For local development, set `APP_DEBUG = true` so that detailed error information is displayed in the browser:
+
+```php
+public const APP_ENV   = 'development';
+public const APP_DEBUG = true;
+```
+
+When `APP_DEBUG` is `true`, the `ErrorHandler::register()` call in `index.php` enables full exception display with file paths and stack traces.
+
+### Production
+
+Before deploying to a public server, review each of the following:
+
+<Warning>
+  **Critical security checklist before going live:**
+
+  1. Set `APP_DEBUG = false` — stack traces expose file paths and internal logic that attackers can exploit.
+  2. Change `SEEDER_KEY` from `'change-me'` to a long random string (e.g., output of `bin2hex(random_bytes(32))`).
+  3. Replace `DB_PASS = ''` with a strong, unique password for your production MySQL user.
+  4. Create a dedicated MySQL user with only the privileges needed (`SELECT`, `INSERT`, `UPDATE`, `DELETE` on `viajes_ajt_3fn`) — do not use `root` in production.
+  5. Serve the application over HTTPS so that the session cookie's `secure` flag is activated automatically.
+</Warning>
+
+```php
+// app/Config/LocalConfig.php — production example
+public const APP_ENV    = 'production';
+public const APP_DEBUG  = false;
+
+public const DB_HOST    = '127.0.0.1';
+public const DB_PORT    = 3306;
+public const DB_NAME    = 'viajes_ajt_3fn';
+public const DB_USER    = 'viajes_user';       // Dedicated, least-privilege user
+public const DB_PASS    = 'your-strong-pass';  // Never commit to version control
+
+public const SEEDER_KEY = 'a9f3e...randomstring...c72b'; // Generated secret
+```
+
+<Tip>
+  Since `LocalConfig.php` is not inside `public/`, it is never directly accessible over HTTP. However, you should still add it to your `.gitignore` (or use a deploy-time replacement strategy) to avoid committing production credentials to source control.
+</Tip>

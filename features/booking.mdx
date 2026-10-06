@@ -1,0 +1,205 @@
+---
+title: "Book a Tour Package: Checkout and Payment Flow"
+sidebarTitle: "Booking"
+description: "How the Viajes AJT booking checkout works — passenger details, payment methods (card, Yape, bank transfer), IGV calculation, and reservation confirmation."
+---
+
+The Viajes AJT booking flow is a single-page checkout handled by `BookingController`. After the customer selects a package and travel date from the catalog, the checkout form collects passenger details, applies a group discount and IGV, and processes payment — all within a single atomic database transaction.
+
+## Checkout URL
+
+```
+GET /checkout?paquete={slug}&fecha_viaje={YYYY-MM-DD}&viajeros={n}
+```
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `paquete` | Yes | Package slug (e.g. `cusco-valle-sagrado-machu-picchu`) |
+| `fecha_viaje` | Yes | Travel date in `YYYY-MM-DD` format; must be a future date |
+| `viajeros` | Yes | Number of travelers (integer, 1–10) |
+
+<Note>
+  Checkout requires an active session. Unauthenticated users are redirected to `/login` and the booking parameters are saved in `$_SESSION['pending_booking']` so that they are automatically restored after login or registration.
+</Note>
+
+## Checkout Form Steps
+
+The checkout view (`checkout.php`) operates in two distinct states controlled by the `$step` variable:
+
+| Step | Trigger | Content |
+|------|---------|---------|
+| **Step 1** | `GET /checkout` | Passenger details form + payment method selection |
+| **Step 3** | Successful `POST /booking/procesar-checkout` | Confirmation page with reservation code |
+
+## Financial Breakdown
+
+`BookingController::calcularDesglose()` computes the full price breakdown from the package's `precio_base` and the number of travelers:
+
+```php
+$subtotal       = $precio_unitario * $viajeros;
+$descuento      = ($viajeros >= 2) ? round($subtotal * 0.10, 2) : 0.00;
+$base_imponible = $subtotal - $descuento;
+$igv            = round($base_imponible * 0.18, 2);
+$total          = round($base_imponible + $igv, 2);
+```
+
+| Concept | Rule |
+|---------|------|
+| **Subtotal** | `precio_base × number_of_travelers` |
+| **Group discount** | 10% off subtotal when `viajeros >= 2` |
+| **IGV** | 18% of the discounted base (`base_imponible`) |
+| **Total charged** | `base_imponible + igv` |
+
+The currency symbol (`S/` by default) is loaded from the `configuracion` table (`moneda_simbolo` key).
+
+## Payment Methods
+
+<Tabs>
+  <Tab title="Card (Tarjeta)">
+    **Code:** `card` — **ID:** `1`
+
+    Payment by credit or debit card. The card number is never stored; only the last 4 digits are kept as the operation reference in the format `TARJETA-XXXX`.
+
+    - **Reservation state on creation:** `pagado`
+    - **Payment state on creation:** `validado`
+    - No file upload required.
+
+    The operation number stored in `pagos.numero_operacion` is:
+    ```
+    TARJETA-{last4}
+    ```
+  </Tab>
+  <Tab title="Yape / Plin">
+    **Code:** `yape` — **ID:** `3`
+
+    Payment via Yape or Plin mobile wallet. The customer must upload a screenshot or PDF of the payment receipt.
+
+    - **Reservation state on creation:** `pendiente`
+    - **Payment state on creation:** `pendiente`
+    - Requires comprobante file upload (manual validation by staff).
+
+    Payment details (QR URL, phone number, account holder) are loaded from the `configuracion` table keys: `yape_qr_url`, `yape_numero`, `yape_titular`, `plin_qr_url`, `plin_numero`, `plin_titular`.
+
+    The operation number stored is:
+    ```
+    TXN-{8-digit-random}
+    ```
+  </Tab>
+  <Tab title="Bank Transfer (Transferencia)">
+    **Code:** `trans` — **ID:** `2`
+
+    Payment via bank transfer. The customer must upload a receipt (screenshot or PDF).
+
+    - **Reservation state on creation:** `pendiente`
+    - **Payment state on creation:** `pendiente`
+    - Requires comprobante file upload (manual validation by staff).
+
+    Bank details loaded from `configuracion`: `banco_nombre`, `banco_cuenta`, `banco_cci`.
+
+    The operation number stored is:
+    ```
+    TXN-{8-digit-random}
+    ```
+  </Tab>
+</Tabs>
+
+## Comprobante (Receipt) Upload
+
+For `yape` and `trans` payments, the customer uploads proof of payment. The file is validated server-side before being saved:
+
+| Check | Rule |
+|-------|------|
+| Presence | File must be attached; missing file fails validation |
+| Max size | 5 MB (`5 * 1024 * 1024` bytes) |
+| Extension | `jpg`, `jpeg`, `png`, `pdf` only |
+| MIME type | Verified with `finfo(FILEINFO_MIME_TYPE)` — must be `image/jpeg`, `image/png`, or `application/pdf` |
+
+**Saved filename format:**
+```
+C-{6-digit-reservation-number}.{ext}
+```
+**Saved path:** `public/uploads/comprobantes/`
+
+The URL stored in `pagos.comprobante_url` is:
+```
+uploads/comprobantes/C-{6-digit}.{ext}
+```
+
+## Passenger Data
+
+The form collects the following fields per traveler (indexed arrays `[0..n-1]`):
+
+| Field | Validation |
+|-------|-----------|
+| `nombres_viajero[]` | Required; letters and spaces only; max 100 chars |
+| `apellidos_viajero[]` | Required; letters and spaces only; max 100 chars |
+| `documento_viajero[]` | Required; alphanumeric only; 6–20 chars (DNI or passport) |
+| `telefono_pasajero` | Required for lead traveler; 7–15 digits (spaces stripped) |
+
+## Reservation Code
+
+Each booking receives a unique code generated before the upload and transaction steps:
+
+```php
+$reservaNum   = str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+$codigoReserva = 'AJT-' . $reservaNum;
+```
+
+Example: `AJT-482951`
+
+## Database Transaction (`Reserva::create`)
+
+`Reserva::create()` wraps all inserts in a single PDO transaction. If any step fails, the entire operation is rolled back and `null` is returned.
+
+```
+BEGIN TRANSACTION
+  1. INSERT INTO reservas          → id_reserva
+  2. INSERT INTO detalle_reservas  → id_detalle
+  3. INSERT INTO viajeros_reserva  (one row per traveler)
+  4. INSERT INTO pagos
+COMMIT
+```
+
+**Table mapping:**
+
+| Table | Key fields |
+|-------|-----------|
+| `reservas` | `id_usuario`, `codigo_reserva`, `descuento`, `estado`, `telefono_pasajero` |
+| `detalle_reservas` | `id_reserva`, `id_paquete`, `fecha_viaje`, `cantidad_pasajeros`, `precio_unitario` |
+| `viajeros_reserva` | `id_detalle`, `nombres`, `apellidos`, `num_documento` |
+| `pagos` | `id_usuario`, `id_metodo_pago`, `id_reserva`, `numero_operacion`, `monto`, `estado`, `comprobante_url` |
+
+## Post-Booking Confirmation
+
+On success, `BookingController::procesarCheckout()` renders the confirmation view (`$step = 3`) directly rather than issuing a redirect. This means the confirmation page is available at the same POST URL immediately after a successful booking.
+
+The confirmation view has access to:
+- `$codigoReserva` — the generated reservation code (e.g. `AJT-482951`)
+- `$desglose` — the full financial breakdown
+- `$configPago` — contact info, QR codes, bank details from `configuracion`
+
+## Payment Configuration Keys
+
+The following keys are read from the `configuracion` table for the checkout and confirmation views:
+
+| Key | Description |
+|-----|-------------|
+| `yape_qr_url` | URL to the Yape QR image |
+| `yape_numero` | Yape phone number |
+| `yape_titular` | Yape account holder name |
+| `plin_qr_url` | URL to the Plin QR image |
+| `plin_numero` | Plin phone number |
+| `plin_titular` | Plin account holder name |
+| `banco_nombre` | Bank name |
+| `banco_cuenta` | Bank account number |
+| `banco_cci` | Bank CCI code |
+| `contacto_telefono` | Support phone |
+| `contacto_email` | Support email |
+| `contacto_whatsapp` | Support WhatsApp |
+| `moneda_simbolo` | Currency symbol (default: `S/`) |
+| `terminos_condiciones` | Terms & conditions text |
+| `politica_cancelacion` | Cancellation policy text |
+
+<Warning>
+  If `configuracion` keys are missing or empty, the system falls back to hardcoded defaults (e.g. `moneda_simbolo` defaults to `S/`). Ensure all payment keys are configured in the admin settings panel before going live.
+</Warning>

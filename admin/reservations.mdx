@@ -1,0 +1,183 @@
+---
+title: "Manage Reservations: Status Updates and CSV Export"
+sidebarTitle: "Reservations"
+description: "View all customer reservations in Viajes AJT, update payment and booking statuses, and export reservation data to CSV for reporting."
+---
+
+The Reservations module, handled by `AdminController`, gives administrators a consolidated view of every booking placed through the platform. From this panel you can filter by status, update a reservation's lifecycle state, review payment evidence, and export the full dataset to a UTF-8 CSV file compatible with Microsoft Excel.
+
+## Route Reference
+
+| Method | Route | Action |
+|---|---|---|
+| `GET` | `/admin/reservas` | List all reservations (filterable by `?estado=`) |
+| `POST` | `/admin/reservas/cambiar-estado` | Update the status of a single reservation |
+| `GET` | `/admin/reservas/exportar` | Download all reservations as a CSV file |
+
+## Reservation List
+
+`GET /admin/reservas` accepts an optional `estado` query parameter to filter the table:
+
+```
+/admin/reservas?estado=pendiente
+/admin/reservas?estado=pagado
+/admin/reservas?estado=cancelado
+```
+
+Omitting `?estado` (or passing any unrecognised value) defaults to `todas`, which returns all reservations ordered by `id_reserva DESC`.
+
+The query joins `reservas`, `usuarios`, `detalle_reservas`, `paquetes`, `pagos`, and `metodos_pago` to expose the full booking context in a single result set:
+
+```sql
+SELECT r.id_reserva, r.codigo_reserva, r.estado, r.created_at, r.descuento,
+       CONCAT(u.nombres, ' ', u.apellidos) AS cliente_nombre,
+       u.email AS cliente_email,
+       p.nombre AS paquete_nombre,
+       dr.fecha_viaje, dr.cantidad_pasajeros AS viajeros,
+       dr.precio_unitario,
+       pa.numero_operacion,
+       pa.estado AS pago_estado,
+       pa.comprobante_url,
+       mp.nombre AS metodo_pago_nombre
+FROM reservas r
+INNER JOIN usuarios u ON r.id_usuario = u.id_usuario
+INNER JOIN detalle_reservas dr ON r.id_reserva = dr.id_reserva
+INNER JOIN paquetes p ON dr.id_paquete = p.id_paquete
+LEFT JOIN pagos pa ON r.id_reserva = pa.id_reserva
+LEFT JOIN metodos_pago mp ON pa.id_metodo_pago = mp.id_metodo
+```
+
+## Reservation Status Values
+
+Each reservation has two separate status fields maintained in sync.
+
+### Booking Status (`reservas.estado`)
+
+| Value | Label | Meaning |
+|---|---|---|
+| `pendiente` | Pending | Reservation created; awaiting payment confirmation |
+| `pagado` | Confirmed | Payment validated; booking is confirmed |
+| `cancelado` | Cancelled | Reservation cancelled by admin or customer |
+
+### Payment Status (`pagos.estado`)
+
+| Value | Label | Meaning |
+|---|---|---|
+| `pendiente` | Pending | Payment submitted but not yet reviewed |
+| `validado` | Validated | Payment confirmed; triggers revenue accounting |
+| `rechazado` | Rejected | Payment evidence invalid or fraudulent |
+
+<Note>
+  Booking and payment statuses are **automatically synchronized**. When an admin changes the reservation status, `Reserva::updateEstado()` wraps both updates in a single PDO transaction:
+
+  | Reservation → | Payment becomes |
+  |---|---|
+  | `pendiente` | `pendiente` |
+  | `pagado` | `validado` |
+  | `cancelado` | `rechazado` |
+</Note>
+
+## Updating a Reservation Status
+
+POST to `/admin/reservas/cambiar-estado` with the following body:
+
+```http
+POST /admin/reservas/cambiar-estado HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+id_reserva=42&nuevo_estado=pagado
+```
+
+The controller validates that `id_reserva` is a positive integer and that `nuevo_estado` is one of `pendiente`, `pagado`, or `cancelado`. Invalid combinations are rejected with a session error message.
+
+```php
+if ($id_reserva <= 0 || !in_array($nuevo_estado, ['pendiente', 'pagado', 'cancelado'], true)) {
+    $_SESSION['error'] = "Datos de reserva o estado no válidos.";
+    header('Location: ' . BASE_URL . '/admin/reservas');
+    exit();
+}
+```
+
+On success, the confirmation message includes a human-readable label:
+
+```php
+$labels = ['pendiente' => 'Pendiente', 'pagado' => 'Confirmada', 'cancelado' => 'Cancelada'];
+$_SESSION['success'] = "Reserva actualizada a estado '" . ($labels[$nuevo_estado] ?? $nuevo_estado) . "' con éxito.
+El pago asociado también fue sincronizado.";
+```
+
+## Payment Methods
+
+Payment method IDs are stored in `pagos.id_metodo_pago` and resolved via the `metodos_pago` table:
+
+| `id_metodo` | Name | Description |
+|---|---|---|
+| `1` | Tarjeta | Credit or debit card |
+| `2` | Transferencia | Bank wire transfer |
+| `3` | Yape/Plin | Mobile wallet (Yape or Plin) |
+
+## Payment Receipts (Comprobantes)
+
+When a customer submits a payment, they upload a proof-of-payment file. The file path is stored as `comprobante_url` in the `pagos` table and follows the naming convention:
+
+```
+public/uploads/comprobantes/C-{codigo_reserva}.{ext}
+```
+
+For example, reservation `AJT-483921` would have its receipt at:
+
+```
+public/uploads/comprobantes/C-AJT-483921.jpg
+```
+
+Customers can also view their own receipt through their profile at:
+
+```
+GET /profile/comprobante/{codigo}
+```
+
+## Reservation Code Format
+
+Every reservation is assigned a unique alphanumeric code at creation time following the pattern `AJT-XXXXXX`, where `XXXXXX` is a zero-padded random integer between 100000 and 999999:
+
+```php
+$codigo = 'AJT-' . str_pad((string)random_int(100000, 999999), 6, '0', STR_PAD_LEFT);
+```
+
+This code is stored in `reservas.codigo_reserva` with a `UNIQUE` constraint.
+
+## Total Calculation
+
+The CSV export and list views compute the reservation total including 18% IGV (Peruvian VAT):
+
+```php
+$subtotal       = (float)$row['precio_unitario'] * (int)$row['viajeros'];
+$descuento      = (float)$row['descuento'];
+$baseImponible  = $subtotal - $descuento;
+$igv            = round($baseImponible * 0.18, 2);
+$totalConIGV    = round($baseImponible + $igv, 2);
+```
+
+## CSV Export
+
+`GET /admin/reservas/exportar` streams a CSV file directly from `php://output` without buffering the full dataset in memory. The file includes a UTF-8 BOM (`\xEF\xBB\xBF`) for Excel compatibility and is named:
+
+```
+reservas_viajes_ajt_YYYY-MM-DD.csv
+```
+
+### CSV Columns
+
+| Column | Source |
+|---|---|
+| Código | `reservas.codigo_reserva` |
+| Cliente | `CONCAT(u.nombres, ' ', u.apellidos)` |
+| Paquete | `paquetes.nombre` |
+| Fecha Viaje | `detalle_reservas.fecha_viaje` |
+| Viajeros | `detalle_reservas.cantidad_pasajeros` |
+| Total (S/) | Calculated with IGV (see formula above) |
+| Estado | Human-readable label: `Pagado`, `Cancelado`, or `Pendiente` |
+
+<Warning>
+  Reservations with status `completado` are not a valid `ENUM` value in the `reservas.estado` column per `schema.sql`. The schema defines only `pendiente`, `pagado`, and `cancelado`. The controller strictly validates against these three values before any DB write.
+</Warning>

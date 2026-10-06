@@ -1,0 +1,319 @@
+---
+title: "MySQL-Backed Rate Limiting for Login and Forms"
+sidebarTitle: "Rate Limiting"
+description: "How Viajes AJT's RateLimiter class uses MySQL to enforce request limits on login, registration, and contact endpoints to prevent brute-force attacks."
+---
+
+Viajes AJT protects sensitive endpoints against brute-force and abuse using a MySQL-backed rate limiter implemented in `App\Helper\RateLimiter`. Rather than relying on external services like Redis, all attempt records are stored in the `rate_limits` table, making the solution self-contained and deployable on any MySQL-capable server.
+
+---
+
+## How It Works
+
+Each tracked request attempt is recorded as a row in the `rate_limits` table with an `identifier` string, the client's `ip_address`, and a `created_at` timestamp. Limiting is checked by counting rows for a given identifier within a sliding time window. When the count reaches `$maxAttempts`, the limiter blocks the request.
+
+```sql
+-- rate_limits table
+CREATE TABLE IF NOT EXISTS rate_limits (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    identifier VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(45)  NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_identifier (identifier),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB;
+```
+
+Old rows are never automatically purged — they simply fall outside the time window and stop being counted. The indexes on both `identifier` and `created_at` keep the window count query fast.
+
+---
+
+## Constructor
+
+```php
+public function __construct(
+    string $identifier,
+    int    $maxAttempts    = 10,
+    int    $windowMinutes  = 15
+)
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `$identifier` | `string` | Unique string key for this limiter (e.g. `"login:ip:127.0.0.1"`) |
+| `$maxAttempts` | `int` | Maximum allowed attempts before the limiter triggers (default: 10) |
+| `$windowMinutes` | `int` | Sliding window size in minutes (default: 15) |
+
+### Identifier Conventions
+
+Identifiers follow a `action:axis:value` naming pattern:
+
+```
+"login:ip:127.0.0.1"          // IP-based limiter for login
+"login:email:user@example.com" // Email-based limiter for login
+"registro:203.0.113.42"        // IP-based limiter for registration
+```
+
+Using two parallel identifiers for the same action (IP + email) allows targeted blocking: an attacker probing many email addresses from one IP is caught by the IP limiter; a distributed attack against one specific account is caught by the email limiter.
+
+---
+
+## Core Methods
+
+### `isLimited(): bool`
+
+Counts attempts within the current window and returns `true` if the limit has been reached:
+
+```php
+public function isLimited(): bool
+{
+    $stmt = $db->prepare(
+        "SELECT COUNT(*) FROM rate_limits
+         WHERE identifier = :identifier
+         AND created_at > DATE_SUB(NOW(), INTERVAL :minutes MINUTE)"
+    );
+    $stmt->execute([
+        ':identifier' => $this->identifier,
+        ':minutes'    => $this->windowMinutes,
+    ]);
+    $attempts = (int)$stmt->fetchColumn();
+
+    return $attempts >= $this->maxAttempts;
+}
+```
+
+### `hit(): void`
+
+Records one attempt in the database:
+
+```php
+public function hit(): void
+{
+    $stmt = $db->prepare(
+        "INSERT INTO rate_limits (identifier, ip_address, created_at)
+         VALUES (:identifier, :ip, NOW())"
+    );
+    $stmt->execute([
+        ':identifier' => $this->identifier,
+        ':ip'         => $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0',
+    ]);
+}
+```
+
+### `check(string $action, string $redirect): bool`
+
+Combines `isLimited()` and `hit()` in one call. If limited, it sends HTTP 429, sets a `Retry-After` header, and either returns a JSON response or redirects depending on the request's `Accept` header. Never returns `false` to the caller — it `exit()`s when limited.
+
+### `remainingAttempts(): int`
+
+Returns how many more attempts are allowed before the limit is hit:
+
+```php
+public function remainingAttempts(): int
+{
+    // Runs the same COUNT query as isLimited()
+    return max(0, $this->maxAttempts - $attempts);
+}
+```
+
+### `clear(): void`
+
+Deletes all attempt records for this identifier — called on successful login or registration to reset the window:
+
+```php
+public function clear(): void
+{
+    $stmt = $db->prepare(
+        "DELETE FROM rate_limits WHERE identifier = :identifier"
+    );
+    $stmt->execute([':identifier' => $this->identifier]);
+}
+```
+
+---
+
+## Login Rate Limiting
+
+Login uses **two parallel limiters** per attempt — one keyed on the client IP and one keyed on the submitted email address. This dual-axis strategy catches both broad-scan and targeted attacks:
+
+```php
+$ip = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+
+$ipLimiter    = new RateLimiter("login:ip:{$ip}",       10, 15); // 10 attempts / 15 min
+$emailLimiter = new RateLimiter("login:email:{$email}",  5, 15); //  5 attempts / 15 min
+
+if ($ipLimiter->isLimited() || $emailLimiter->isLimited()) {
+    http_response_code(429);
+    header('Retry-After: 900'); // 15 minutes in seconds
+
+    $message = 'Demasiados intentos de inicio de sesión. Intente nuevamente en 15 minutos.';
+
+    if (str_contains($_SERVER['HTTP_ACCEPT'] ?? '', 'application/json') ||
+        str_contains($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '', 'XMLHttpRequest')) {
+        $this->json(['error' => $message, 'remaining' => 0], 429);
+    }
+
+    // HTML path: redirect with flash message
+    $this->setFlash('error', $message);
+    $_SESSION['rate_limit_warning'] = ['remaining' => 0, 'max' => 5, 'message' => $message];
+    $this->redirect($redirectFail);
+}
+```
+
+**Important behavior details:**
+
+- `hit()` is called only on a **failed** login, not on every attempt. A successful authentication never increments the counter.
+- Both limiters are **cleared** (`clear()`) immediately after a successful login, resetting the window for the next session.
+- `session_regenerate_id(true)` is called after clearing limiters on success, preventing session fixation.
+
+### Early Warning
+
+When a failed login leaves fewer than 5 attempts remaining on the email limiter, a warning is shown before the account is locked:
+
+```php
+$attemptsLeft = $emailLimiter->remainingAttempts();
+if ($attemptsLeft > 0 && $attemptsLeft < 5) {
+    $msg = "Te quedan {$attemptsLeft} "
+         . ($attemptsLeft === 1 ? "intento" : "intentos")
+         . " de inicio de sesión.";
+    $this->setFlash('warning', $msg);
+    $_SESSION['rate_limit_warning'] = [
+        'remaining' => $attemptsLeft,
+        'max'       => 5,
+        'message'   => $msg,
+    ];
+}
+```
+
+### Login Limits Summary
+
+| Limiter | Identifier pattern | Max attempts | Window |
+|---|---|---|---|
+| IP limiter | `login:ip:{ip}` | 10 | 15 minutes |
+| Email limiter | `login:email:{email}` | 5 | 15 minutes |
+
+---
+
+## Registration Rate Limiting
+
+Registration uses a single IP-based limiter with a tighter window to limit account creation from one address:
+
+```php
+$ip     = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+$limiter = new RateLimiter("registro:{$ip}", 3, 60); // 3 registrations per hour per IP
+$limiter->check('registro', '/auth/registro');
+```
+
+`check()` both records the attempt and blocks if the limit is exceeded, so no separate `hit()` call is needed. A single IP address can create at most 3 accounts within any 60-minute window.
+
+---
+
+## HTTP 429 Response Shape
+
+When `check()` blocks a JSON request (detected via `Accept: application/json` or `X-Requested-With: XMLHttpRequest`), the response body is:
+
+```json
+{
+  "error": "Demasiados intentos para esta acción. Por favor, intente nuevamente en 15 minutos.",
+  "retry_after": 900
+}
+```
+
+For login specifically, the JSON response also includes a `remaining` field:
+
+```json
+{
+  "error": "Demasiados intentos de inicio de sesión. Intente nuevamente en 15 minutos.",
+  "remaining": 0
+}
+```
+
+The HTTP response always carries `Retry-After: 900` (for 15-minute windows) or the corresponding value for other window sizes.
+
+---
+
+## Fail-Open Behavior
+
+If the database is unavailable when `isLimited()` or `remainingAttempts()` is called, the `PDOException` is caught, logged to the PHP error log, and the method returns `false` / `$this->maxAttempts` respectively:
+
+```php
+} catch (PDOException $e) {
+    error_log("RateLimiter::isLimited — DB error: " . $e->getMessage());
+    // Fail open: allow the request to proceed
+    return false;
+}
+```
+
+This is a deliberate trade-off — a database outage should not lock legitimate users out of the application. The risk of a brief unprotected window during DB downtime is considered acceptable relative to the harm of a complete login outage.
+
+<Warning>
+  Fail-open means that during a database outage, rate limiting is completely bypassed. Ensure MySQL availability is monitored and the database host is hardened at the network level to reduce exposure during outages.
+</Warning>
+
+---
+
+## Usage Examples
+
+<Tabs>
+  <Tab title="Two-Axis Login Limiting">
+    ```php
+    use App\Helper\RateLimiter;
+
+    $ip    = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    $email = $_POST['email'] ?? '';
+
+    $ipLimiter    = new RateLimiter("login:ip:{$ip}",      10, 15);
+    $emailLimiter = new RateLimiter("login:email:{$email}", 5, 15);
+
+    // Check both limiters before validating credentials
+    if ($ipLimiter->isLimited() || $emailLimiter->isLimited()) {
+        http_response_code(429);
+        header('Retry-After: 900');
+        // ... respond and exit
+    }
+
+    // Validate credentials
+    $user = Usuario::findByEmail($email);
+    if ($user && password_verify($password, $user['password_hash'])) {
+        // Success: clear limiters and regenerate session
+        $ipLimiter->clear();
+        $emailLimiter->clear();
+        session_regenerate_id(true);
+    } else {
+        // Failure: record the attempt
+        $ipLimiter->hit();
+        $emailLimiter->hit();
+    }
+    ```
+  </Tab>
+  <Tab title="Single-Axis Form Limiting">
+    ```php
+    use App\Helper\RateLimiter;
+
+    // Limit contact form submissions to 5 per 10 minutes per IP
+    $ip      = $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
+    $limiter = new RateLimiter("contacto:{$ip}", 5, 10);
+
+    // check() records the hit AND blocks if limited — one call does both
+    $limiter->check('envío de contacto', '/contacto');
+
+    // If we reach here, the request is within limits — process the form
+    ```
+  </Tab>
+  <Tab title="Remaining Attempts Warning">
+    ```php
+    use App\Helper\RateLimiter;
+
+    $limiter = new RateLimiter("login:email:{$email}", 5, 15);
+
+    $remaining = $limiter->remainingAttempts();
+
+    if ($remaining > 0 && $remaining < 5) {
+        $this->setFlash(
+            'warning',
+            "Te quedan {$remaining} " . ($remaining === 1 ? "intento" : "intentos") . "."
+        );
+    }
+    ```
+  </Tab>
+</Tabs>

@@ -1,0 +1,201 @@
+---
+title: "User Accounts: Registration, Login, and Profile Management"
+sidebarTitle: "User Accounts"
+description: "How customers create accounts, log in, manage their profile, change passwords, and view booking history and visa applications in Viajes AJT."
+---
+
+Viajes AJT uses a role-based authentication system built on top of PHP sessions. Customer registration and login are handled by `AuthController`, while profile management is handled by `ProfileController`. All session data is stored under the `VIAJESAJTSESSID` cookie and scoped to the current browser session.
+
+## Session Configuration
+
+Sessions are configured in `public/index.php` with the following secure cookie parameters:
+
+| Parameter | Value |
+|-----------|-------|
+| Cookie name | `VIAJESAJTSESSID` |
+| `httponly` | `true` |
+| `samesite` | `Lax` |
+| `secure` | `true` when `$_SERVER['HTTPS']` is set; `false` otherwise |
+| `lifetime` | `0` (session cookie — expires when browser closes) |
+| `path` | `/` |
+
+### Session Payload
+
+After a successful login or registration, the session contains:
+
+```php
+$_SESSION['usuario'] = [
+    'id_usuario' => 42,
+    'id_rol'     => 1,       // 1 = Customer, 2 = Admin
+    'nombres'    => 'María',
+    'apellidos'  => 'García',
+    'email'      => 'maria@example.com',
+];
+```
+
+## User Roles
+
+| `id_rol` | Role | Post-login redirect |
+|----------|------|---------------------|
+| `1` | Customer (Cliente) | `/` (homepage) |
+| `2` | Administrator | `/admin/dashboard` |
+
+## Registration
+
+Registration is available at `GET /auth/registro` (also aliased as `GET /registro`). The form is processed by `POST /auth/registro` → `AuthController::procesarRegistro()`.
+
+<Steps>
+  <Step title="Fill in the registration form">
+    The customer fills out all required fields:
+
+    | Field | Required | Validation |
+    |-------|----------|-----------|
+    | `nombres` | Yes | 2–100 chars; letters and spaces only (`/^[\p{L}\s]+$/u`) |
+    | `apellidos` | Yes | 2–100 chars; letters and spaces only (`/^[\p{L}\s]+$/u`) |
+    | `email` | Yes | Valid email format (`FILTER_VALIDATE_EMAIL`); must be unique |
+    | `password` | Yes | Minimum 6 characters |
+    | `telefono` | Optional | 7–15 digits (spaces stripped before validation) |
+    | `dni_pasaporte` | Yes | 6–20 characters |
+  </Step>
+
+  <Step title="Server-side validation">
+    All fields are validated in `AuthController::procesarRegistro()`. If any rule fails, the user is redirected back to `/auth/registro` with a flash error message. POST data (except password) is preserved in `$_POST` so the form is not cleared.
+
+    Email uniqueness is checked via `Usuario::findByEmail($email)`. If the email is already registered, an error is returned without creating the account.
+  </Step>
+
+  <Step title="Password hashed and account created">
+    The password is hashed using bcrypt before storage:
+
+    ```php
+    $passwordHash = password_hash($password, PASSWORD_BCRYPT);
+    ```
+
+    `Usuario::create()` inserts the new row into `usuarios` with `id_rol = 1` (Customer) by default.
+  </Step>
+
+  <Step title="Session initialized and redirect">
+    On success, `session_regenerate_id(true)` is called to prevent session fixation, the `$_SESSION['usuario']` array is populated, and the user is redirected.
+
+    **Redirect priority:**
+    1. If `$_SESSION['pending_booking']` exists → redirect to `/checkout` with the saved parameters
+    2. If `$_SESSION['pending_visa']` exists → redirect to `/visas`
+    3. Otherwise → redirect to `/profile/mi-perfil`
+  </Step>
+</Steps>
+
+<Note>
+  Registration is rate-limited to **3 attempts per IP per hour** via `RateLimiter("registro:{$ip}", 3, 60)` to prevent automated account creation.
+</Note>
+
+## AJAX Email Validation
+
+The registration form checks email availability in real time before submission using a dedicated API endpoint:
+
+```
+GET /api/validar-email?email={email}
+```
+
+**Response shape:**
+
+```json
+{ "valid": true }
+```
+
+```json
+{ "valid": false, "message": "Este correo ya está registrado." }
+```
+
+```json
+{ "valid": false, "message": "Formato de correo inválido." }
+```
+
+The endpoint is handled by `AuthController::validateEmail()` and calls `Usuario::findByEmail()`. It returns `Content-Type: application/json` in all cases.
+
+## Login
+
+Login is available at `GET /auth/login` (also aliased as `GET /login`). Credentials are submitted via `POST /auth/login` → `AuthController::procesarLogin()`.
+
+**Accepted fields:**
+
+| Field | Notes |
+|-------|-------|
+| `email` | The registered email address. The shortcut `admin` is accepted as an alias for `admin@viajesajt.com` |
+| `password` | Plain text password; verified against the stored bcrypt hash via `password_verify()` |
+
+On success, `session_regenerate_id(true)` is called and the session is populated. On failure, rate-limit counters are incremented and an error flash message is shown.
+
+### Rate Limiting
+
+Login is protected by two independent rate limiters:
+
+| Limiter | Key | Threshold | Window |
+|---------|-----|-----------|--------|
+| By IP | `login:ip:{ip}` | 10 failures | 15 minutes |
+| By email | `login:email:{email}` | 5 failures | 15 minutes |
+
+If either limit is exceeded, the server responds with HTTP `429` and a `Retry-After: 900` header. A warning toast is shown when the customer has fewer than 5 remaining attempts.
+
+## Logout
+
+<Warning>
+  `GET /auth/logout` is intentionally **blocked** and returns an error message: *"Para cerrar sesión use el botón seguro del sitio."* This prevents logout via CSRF link attacks.
+</Warning>
+
+Logout requires a `POST` request:
+
+```
+POST /auth/logout
+```
+
+`AuthController::logout()` clears the session array, invalidates the session cookie, destroys the session with `session_destroy()`, then starts a fresh session and sets a success flash message before redirecting to `/auth/login`.
+
+## Profile Page
+
+All profile routes are protected by `ProfileController::__construct()`, which checks for `$_SESSION['usuario']` on every request and redirects unauthenticated users to `/login`.
+
+| Method | URL | Action |
+|--------|-----|--------|
+| `GET` | `/profile/mi-perfil` | View account details, bookings, and visa applications |
+| `POST` | `/profile/guardar-cuenta` | Update account details |
+| `POST` | `/profile/cambiar-password` | Change password |
+| `GET` | `/profile/comprobante/{codigo}` | View printable booking receipt |
+
+### Profile Data Loaded
+
+`ProfileController::miPerfil()` fetches:
+
+- **Account details** via `Usuario::findById($id_usuario)`
+- **Booking history** via `Reserva::findByUsuario($id_usuario)` — includes package name, travel date, passenger count, payment status, and payment method
+- **Visa applications** via `Visa::findByUsuario($id_usuario)` — includes visa type, country, advisory fee, tracking code, and current status
+
+### Updating Account Details (`POST /profile/guardar-cuenta`)
+
+Customers can update `nombres`, `apellidos`, `telefono`, and `dni_pasaporte`. The same validation rules as registration apply. On success, `$_SESSION['usuario']['nombres']` and `$_SESSION['usuario']['apellidos']` are updated in-place so the navigation reflects the change immediately.
+
+### Changing Password (`POST /profile/cambiar-password`)
+
+**Required POST fields:**
+
+| Field | Description |
+|-------|-------------|
+| `password_actual` | Current password (verified via `password_verify()`) |
+| `password_nueva` | New password (minimum 6 characters) |
+| `password_confirm` | Must exactly match `password_nueva` |
+
+The new hash is stored via `Usuario::cambiarPassword($id_usuario, $hash)` using `password_hash($newPass, PASSWORD_BCRYPT)`.
+
+### Viewing a Receipt (`GET /profile/comprobante/{codigo}`)
+
+The receipt page loads the full reservation via `Reserva::findByCodigo($codigo, $id_usuario)`, which enforces ownership — only the booking owner can view their receipt. The financial breakdown (subtotal, discount, IGV, total) is recalculated server-side on every view.
+
+## Model Methods Reference
+
+| Model | Method | Description |
+|-------|--------|-------------|
+| `Usuario` | `findByEmail(string $email)` | Returns user array or `null` |
+| `Usuario` | `findById(int $id)` | Returns user array or `null` |
+| `Usuario` | `create(array $data)` | Inserts new user; returns `bool` |
+| `Usuario` | `updateAccount(int $id, array $data)` | Updates `nombres`, `apellidos`, `telefono`, `dni_pasaporte` |
+| `Usuario` | `cambiarPassword(int $id, string $hash)` | Updates `password_hash` |
+| `Usuario` | `verifyPassword(int $id, string $password)` | Verifies plain password against stored hash |

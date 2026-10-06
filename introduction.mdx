@@ -1,0 +1,66 @@
+---
+title: "Viajes AJT: Full-Stack PHP Travel Agency Platform"
+sidebarTitle: "Introduction"
+description: "Viajes AJT is a custom PHP MVC travel agency platform with tour package booking, visa advisory, and a full admin back-office. No external framework required."
+---
+
+Viajes AJT is a complete, dependency-free travel agency web application built in PHP 8 on a custom MVC framework. It powers the full customer journey — from browsing tour packages and booking travel to requesting visa advisory services — alongside a back-office admin panel for managing inventory, reservations, users, and financial reporting.
+
+## What Viajes AJT provides
+
+<CardGroup cols={2}>
+  <Card title="Tour Package Catalog" icon="map" href="/features/catalog">
+    Browse packages by destination and category, view full itineraries and pricing, and use the live JSON search API
+  </Card>
+  <Card title="Online Booking" icon="credit-card" href="/features/booking">
+    Multi-step checkout with IGV calculation, group discounts, and support for card, Yape/Plin, and bank transfer payments
+  </Card>
+  <Card title="Visa Advisory" icon="passport" href="/features/visa-advisory">
+    Service catalog with advisory request submission and 8-stage workflow tracking from intake to approval
+  </Card>
+  <Card title="User Accounts" icon="user" href="/features/user-accounts">
+    Role-based registration and login, profile management, booking history, and secure session handling
+  </Card>
+  <Card title="Admin Dashboard" icon="chart-bar" href="/admin/overview">
+    Real-time KPIs, monthly revenue charts, reservation management, and exportable sales reports
+  </Card>
+  <Card title="Technical Reference" icon="code" href="/reference/architecture">
+    PSR-4 MVC architecture, custom router, database schema, CSRF/rate-limit security, and HTTP API docs
+  </Card>
+</CardGroup>
+
+## Platform roles
+
+Viajes AJT has two distinct user roles, each with a different experience:
+
+| Role | `id_rol` | Default redirect after login | Access |
+|---|---|---|---|
+| **Client** | `1` | `/` (home) | Public catalog, booking checkout, profile, visa requests |
+| **Administrator** | `2` | `/admin/dashboard` | All client features + full back-office panel |
+
+<Note>
+Administrators are created from the Users section of the admin panel at `/admin/usuarios`. The first admin account must be seeded directly via `database/seed.sql` or by manually inserting a user with `id_rol = 2`.
+</Note>
+
+## Technology stack
+
+| Layer | Technology |
+|---|---|
+| Language | PHP 8.0+ |
+| Architecture | Custom MVC, PSR-4 autoloader, no Composer |
+| Database | MySQL 5.7+ / MariaDB 10.4+, PDO with prepared statements |
+| Web server | Apache with `mod_rewrite` |
+| Frontend | Vanilla JS + jQuery 3.7.1, CSS custom properties (design tokens) |
+| Session | PHP native sessions (`VIAJESAJTSESSID`) |
+| Security | CSRF tokens, bcrypt passwords, MySQL rate limiting, HTTP security headers |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Install the platform" icon="server" href="/installation">
+    Step-by-step setup with Apache, MySQL, and the front controller
+  </Card>
+  <Card title="Configure settings" icon="gear" href="/configuration">
+    Database credentials, debug mode, and payment gateway configuration
+  </Card>
+</CardGroup>
